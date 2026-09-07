@@ -199,6 +199,7 @@ class InfluxClient:
         Returns: (data_list, uses_true_solcast)
         """
         data_list: list[tuple[float, ...]] = []
+        uses_true_solcast = False
         try:
             if self.version == "1":
                 auth = (self.username, self.password) if self.username and self.password else None
