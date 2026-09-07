@@ -483,21 +483,6 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception:
                 pass
 
-        # Mirror to legacy pyscript entity for 100% backward compatibility with Card 0
-        try:
-            self.hass.states.async_set(
-                "pyscript.advisor_simulation_data",
-                now.isoformat(),
-                {
-                    "friendly_name": "Advisor Simulation Data",
-                    "icon": "mdi:chart-line",
-                    "data": json.dumps({"plan": avg_hist}),
-                    "is_bedtime": False,
-                    "is_bedtime_prediction": False,
-                },
-            )
-        except Exception:
-            pass
 
         return {
             "state": final_state,
