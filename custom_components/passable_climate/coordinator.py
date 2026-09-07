@@ -171,11 +171,60 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass, entities_to_track, _handle_tracked_state_change
             )
 
+        # Reactive listener for manual circulation toggle switches
+        circ_bools: list[str] = []
+        for z_key, z_conf in zones_config.items():
+            if z_conf.get(CONF_CIRCULATION_ENABLED, False):
+                act_ent = z_conf.get(CONF_CIRCULATION_ACTIVE_BOOLEAN)
+                if act_ent and act_ent not in circ_bools:
+                    circ_bools.append(act_ent)
+
+        if circ_bools:
+            async def _handle_circ_toggle(event: Any) -> None:
+                new_state = event.data.get("new_state")
+                old_state = event.data.get("old_state")
+                if not new_state or not old_state or new_state.state == old_state.state:
+                    return
+                ent_id = event.data.get("entity_id")
+                for z_k, z_c in zones_config.items():
+                    if z_c.get(CONF_CIRCULATION_ACTIVE_BOOLEAN) == ent_id:
+                        climate_e = z_c.get(CONF_CLIMATE_ENTITY)
+                        eco_e = z_c.get(CONF_CIRCULATION_ECO_BOOLEAN)
+                        temp_e = z_c.get(CONF_TEMP_SENSOR)
+                        now_u = dt_util.utcnow()
+                        if new_state.state == "on":
+                            _LOGGER.info("Passable Smart Climate: Manual toggle ON for %s circulation.", z_k)
+                            if climate_e:
+                                await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "on"})
+                            if eco_e:
+                                await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": eco_e})
+                            in_t = float(self._get_val(temp_e, 70.0) or 70.0)
+                            if not self.circulation_manager.state_memory[z_k].get("start_time"):
+                                self.circulation_manager.state_memory[z_k]["start_time"] = now_u
+                                self.circulation_manager.state_memory[z_k]["start_temp"] = in_t
+                                await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                        elif new_state.state == "off":
+                            _LOGGER.info("Passable Smart Climate: Manual toggle OFF for %s circulation.", z_k)
+                            if climate_e:
+                                await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "auto"})
+                            if eco_e:
+                                await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_e})
+                            self.circulation_manager.state_memory[z_k]["start_time"] = None
+                            self.circulation_manager.state_memory[z_k]["start_temp"] = None
+                            await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+
+            self._unsub_circ = async_track_state_change_event(
+                self.hass, circ_bools, _handle_circ_toggle
+            )
+
     def async_unload(self) -> None:
         """Unsubscribe all listeners."""
         if hasattr(self, "_unsub_track") and self._unsub_track:
             self._unsub_track()
             self._unsub_track = None
+        if hasattr(self, "_unsub_circ") and self._unsub_circ:
+            self._unsub_circ()
+            self._unsub_circ = None
 
     async def async_retrain_models(self) -> None:
         """Executes full historical regression training in a background executor thread."""
@@ -409,7 +458,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     min_runtime_minutes=int(self.options.get(CONF_CIRC_MIN_MINUTES, DEFAULT_CIRC_MIN_MINUTES)),
                     max_runtime_minutes=int(self.options.get(CONF_CIRC_MAX_MINUTES, DEFAULT_CIRC_MAX_MINUTES)),
                     stall_margin=float(self.options.get(CONF_CIRC_STALL_MARGIN, DEFAULT_CIRC_STALL_MARGIN)),
-                    lockout_hours=lockout or int(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)),
+                    lockout_hours=int(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)),
                 )
 
                 if circ_action == "turn_on" and not fan_is_active:
@@ -432,6 +481,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_bool_ent})
                     if climate_ent:
                         await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "auto"})
+                    if lockout > 0:
+                        self.circulation_manager.state_memory[z_key]["lockout_until"] = now_utc + datetime.timedelta(hours=lockout)
                     self.circulation_manager.state_memory[z_key]["start_time"] = None
                     self.circulation_manager.state_memory[z_key]["start_temp"] = None
                     await self._learning_store.async_save(self.circulation_manager.export_learning_data())
