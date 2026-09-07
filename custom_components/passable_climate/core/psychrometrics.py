@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import math
 
+ATM_PRESSURE_HPA: float = 1013.25  # Standard sea-level barometric pressure (hPa)
+
+
 class PsychrometricEngine:
     """High-precision psychrometric calculations for moist air."""
 
-    ATM_PRESSURE_HPA: float = 1013.25  # Standard sea-level barometric pressure
+    ATM_PRESSURE_HPA = ATM_PRESSURE_HPA
 
     @staticmethod
     def f_to_c(temp_f: float) -> float:

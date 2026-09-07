@@ -16,6 +16,7 @@ import homeassistant.util.dt as dt_util
 
 from .const import (
     CONF_AQI_ENTITY,
+    CONF_AQI_THRESHOLD,
     CONF_BEDTIME_START,
     CONF_CIRC_DELTA_THRESHOLD,
     CONF_CIRC_LOCKOUT_HOURS,
