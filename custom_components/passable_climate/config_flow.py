@@ -336,7 +336,15 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         super().__init__()
-        self.config_entry = config_entry
+        self._config_entry = config_entry
+
+    @property
+    def config_entry(self) -> config_entries.ConfigEntry:
+        return self._config_entry
+
+    @config_entry.setter
+    def config_entry(self, value: config_entries.ConfigEntry) -> None:
+        self._config_entry = value
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Presents categorized tuning menu."""
@@ -352,7 +360,8 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_thermodynamic_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Adjusts enthalpy and temperature deadbands."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            new_options = {**self.config_entry.options, **user_input}
+            return self.async_create_entry(title="", data=new_options)
 
         opts = self.config_entry.options
         schema = vol.Schema(
@@ -376,7 +385,8 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_veto_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Adjusts hazard safety limits and dwell timers."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            new_options = {**self.config_entry.options, **user_input}
+            return self.async_create_entry(title="", data=new_options)
 
         opts = self.config_entry.options
         schema = vol.Schema(
@@ -403,7 +413,8 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_circulation_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Adjusts convective circulation guardrails."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            new_options = {**self.config_entry.options, **user_input}
+            return self.async_create_entry(title="", data=new_options)
 
         opts = self.config_entry.options
         schema = vol.Schema(
@@ -426,3 +437,4 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
         return self.async_show_form(step_id="circulation_settings", data_schema=schema)
+
