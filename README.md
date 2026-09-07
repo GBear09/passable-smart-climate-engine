@@ -118,7 +118,9 @@ You do not need to delete or alter your existing Pyscript files:
 | `binary_sensor.passable_climate_weather_hazard_veto` | `binary_sensor` | Active safety veto (rain probability, high wind speed/gust, AQI). |
 | `binary_sensor.passable_climate_upstairs_free_cooling` | `binary_sensor` | Indicates whether free passive conditioning is advantageous Upstairs. |
 | `binary_sensor.passable_climate_downstairs_free_cooling` | `binary_sensor` | Indicates whether free passive conditioning is advantageous Downstairs. |
+| `button.passable_climate_refresh_window_recommendation` | `button` | 1-click button to immediately force advisor re-evaluation and simulation update. |
 | `button.passable_climate_retrain_thermal_models` | `button` | 1-click button to trigger background InfluxDB regression retraining. |
+
 
 ### The 16 Canonical Plot Data Sensors (`sensor.plot_data_*`)
 

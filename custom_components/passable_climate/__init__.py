@@ -34,6 +34,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Initialize coordinator: load cached models and circulation memory
     await coordinator.async_initialize()
 
+    # Setup reactive listeners for window contacts and profile updates
+    coordinator.async_setup_listeners()
+
     # Perform first refresh
     await coordinator.async_config_entry_first_refresh()
 
@@ -85,6 +88,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    coordinator: SmartClimateCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator:
+        coordinator.async_unload()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)

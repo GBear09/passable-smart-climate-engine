@@ -146,6 +146,35 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.warning("Could not load circulation learning records: %s", err)
 
+    def async_setup_listeners(self) -> None:
+        """Sets up reactive state listeners on window contact sensors and comfort profile."""
+        from homeassistant.helpers.event import async_track_state_change_event
+        entities_to_track: list[str] = []
+        zones_config = self.entry_data.get(CONF_ZONES, {})
+        for z_conf in zones_config.values():
+            win_ent = z_conf.get(CONF_OPEN_WINDOWS_SENSOR)
+            if win_ent and win_ent not in entities_to_track:
+                entities_to_track.append(win_ent)
+
+        cp_ent = self.options.get(CONF_COMFORT_PROFILE, self.entry_data.get(CONF_COMFORT_PROFILE))
+        if cp_ent and cp_ent not in entities_to_track:
+            entities_to_track.append(cp_ent)
+
+        if entities_to_track:
+            async def _handle_tracked_state_change(event: Any) -> None:
+                _LOGGER.debug("Reactive trigger from tracked entity %s; refreshing climate plan.", event.data.get("entity_id"))
+                await self.async_request_refresh()
+
+            self._unsub_track = async_track_state_change_event(
+                self.hass, entities_to_track, _handle_tracked_state_change
+            )
+
+    def async_unload(self) -> None:
+        """Unsubscribe all listeners."""
+        if hasattr(self, "_unsub_track") and self._unsub_track:
+            self._unsub_track()
+            self._unsub_track = None
+
     async def async_retrain_models(self) -> None:
         """Executes full historical regression training in a background executor thread."""
         lookback = int(self.options.get(CONF_INFLUX_LOOKBACK_DAYS, self.entry_data.get(CONF_INFLUX_LOOKBACK_DAYS, 365)))

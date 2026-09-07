@@ -22,6 +22,7 @@ async def async_setup_entry(
 
     async_add_entities([
         PassableRetrainModelsButton(coordinator, entry),
+        PassableRefreshAdvisorButton(coordinator, entry),
     ])
 
 class PassableRetrainModelsButton(CoordinatorEntity[SmartClimateCoordinator], ButtonEntity):
@@ -44,3 +45,25 @@ class PassableRetrainModelsButton(CoordinatorEntity[SmartClimateCoordinator], Bu
     async def async_press(self) -> None:
         """Triggers the background training job."""
         self.hass.async_create_task(self.coordinator.async_retrain_models())
+
+class PassableRefreshAdvisorButton(CoordinatorEntity[SmartClimateCoordinator], ButtonEntity):
+    """Manually forces an immediate evaluation of the window advisor and simulation plan."""
+
+    def __init__(self, coordinator: SmartClimateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"passable_climate_{entry.entry_id}_refresh_plan"
+        self.entity_id = "button.passable_climate_refresh_window_recommendation"
+        self._attr_name = "Refresh Window Recommendation"
+        self._attr_icon = "mdi:refresh"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry.entry_id}_hub")},
+            name="Passable Smart Climate Hub",
+            manufacturer="Passable Systems",
+            model="Smart Climate Engine Hub",
+        )
+
+    async def async_press(self) -> None:
+        """Forces an immediate coordinator refresh."""
+        await self.coordinator.async_request_refresh()
+
