@@ -217,6 +217,7 @@ class PassableSimulationDataSensor(CoordinatorEntity[SmartClimateCoordinator], S
             "icon": "mdi:chart-line",
             "data": json.dumps({"plan": self.coordinator.last_plan_history}),
             "is_bedtime": False,
+            "is_bedtime_prediction": False,
         }
 
 class PassableAdvisorRecommendationSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
