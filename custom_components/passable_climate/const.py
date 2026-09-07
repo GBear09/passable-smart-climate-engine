@@ -48,6 +48,7 @@ CONF_RECOMMENDATION_ENTITY = "recommendation_entity"
 CONF_PREDICT_HEAT_BOOLEAN = "predict_heat_boolean"
 CONF_PREDICTION_MESSAGE_TEXT = "prediction_message_text"
 CONF_COMFORT_RECOVERY_BOOLEAN = "comfort_recovery_boolean"
+CONF_HVAC_TRANSITION_OFFSET = "hvac_transition_offset_entity"
 
 # Configuration Keys - Thermodynamic & Veto Thresholds
 CONF_MIN_ENTHALPY_DELTA = "min_enthalpy_delta"
@@ -85,6 +86,8 @@ DEFAULT_RECOMMENDATION_ENTITY = "input_text.comfort_profile_overview"
 DEFAULT_PREDICT_HEAT_BOOLEAN = "input_boolean.hvac_advisor_predicts_heat_needed"
 DEFAULT_PREDICTION_MESSAGE_TEXT = "input_text.hvac_advisor_prediction_message"
 DEFAULT_COMFORT_RECOVERY_BOOLEAN = "input_boolean.hvac_advisor_comfort_recovery_mode"
+DEFAULT_HVAC_TRANSITION_OFFSET_ENTITY = "input_number.hvac_transition_offset"
+DEFAULT_HVAC_TRANSITION_OFFSET = 2.0
 
 # Defaults - Thresholds
 DEFAULT_MIN_ENTHALPY_DELTA = 1.2

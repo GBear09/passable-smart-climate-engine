@@ -119,3 +119,8 @@ class ZonePlanResult:
     actions: list[SimulationAction]
     eco_mode_requested: bool
     comfort_recovery_triggered: bool = False
+    scenario: str = "standard"
+    target_time: str | None = None
+    hours_to_comfort: float | None = None
+    temp_change: float | None = None
+    predicted_temp: float | None = None

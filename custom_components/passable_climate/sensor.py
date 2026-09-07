@@ -216,8 +216,11 @@ class PassableSimulationDataSensor(CoordinatorEntity[SmartClimateCoordinator], S
             "friendly_name": "Advisor Simulation Data",
             "icon": "mdi:chart-line",
             "data": json.dumps({"plan": self.coordinator.last_plan_history}),
-            "is_bedtime": False,
-            "is_bedtime_prediction": False,
+            "is_bedtime": self.coordinator.is_bedtime,
+            "is_evening": self.coordinator.is_evening,
+            "is_bedtime_prediction": self.coordinator.is_bedtime or self.coordinator.is_evening,
+            "phase": self.coordinator.current_phase,
+            "seasonal_mode": self.coordinator.seasonal_mode,
         }
 
 class PassableAdvisorRecommendationSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
@@ -247,6 +250,13 @@ class PassableAdvisorRecommendationSensor(CoordinatorEntity[SmartClimateCoordina
             "details": self.coordinator.last_details,
             "is_hazard_vetoed": self.coordinator.is_hazard_vetoed,
             "hazard_veto_reason": self.coordinator.hazard_veto_reason,
+            "phase": self.coordinator.current_phase,
+            "scenario": self.coordinator.current_scenario,
+            "target_time": self.coordinator.current_target_time,
+            "seasonal_mode": self.coordinator.seasonal_mode,
+            "seasonal_details": self.coordinator.seasonal_details,
+            "heat_prediction_alert": self.coordinator.heat_prediction_alert,
+            "comfort_recovery_active": self.coordinator.comfort_recovery_active,
         }
 
 class PassableOutdoorEnthalpySensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
