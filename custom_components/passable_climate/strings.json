@@ -89,6 +89,12 @@
           "max_dew_point": "Maximum Outdoor Dew Point (°F)",
           "open_temp_margin": "Open Window Target Margin (°F)",
           "close_temp_margin": "Close Window Hysteresis Margin (°F)"
+        },
+        "data_description": {
+          "min_enthalpy_delta": "Total energy advantage (sensible + latent) required before recommending open windows. Default: 1.2 BTU/lb. Higher (1.5-2.0): Conservative; only opens when outside is significantly cooler and drier. Lower (0.6-1.0): Aggressive; opens with minor cooling advantages.",
+          "max_dew_point": "Absolute outdoor moisture ceiling allowed for ventilation. Default: 58.0°F. Higher (60-65°F): Tolerates higher humidity, but may introduce indoor clamminess. Lower (50-55°F): Stricter humidity control; keeps indoor air crisp and dry.",
+          "open_temp_margin": "Temperature above active cooling setpoint before open window recommendation triggers. Default: 1.0°F. Higher (1.5-2.5°F): Delays opening until room warms up further. Lower (0.5-0.8°F): Prompts opening earlier as indoor temperature begins to drift.",
+          "close_temp_margin": "Hysteresis deadband below target setpoint before calling to close windows. Default: 0.2°F. Higher (0.4-0.8°F): Allows deeper free overcooling to store thermal mass. Lower (0.0-0.2°F): Closes promptly upon reaching target to avoid chilly drafts."
         }
       },
       "veto_settings": {
@@ -100,17 +106,35 @@
           "high_wind_speed": "High Sustained Wind Speed Limit (mph)",
           "high_wind_gust": "High Wind Gust Limit (mph)",
           "max_precipitation_probability": "Maximum Precipitation Probability (%)"
+        },
+        "data_description": {
+          "open_dwell_minutes": "Anti-flapping latch time. Once open windows are recommended, this recommendation is held for at least this duration. Default: 45 min. Higher (60-90 min): Minimizes notification flapping. Lower (15-30 min): Reacts quicker to rapidly changing weather.",
+          "forecast_lookahead_minutes": "Forward forecast window scanned for upcoming rain, wind, or adverse conditions. Default: 60 min. Higher (90-120 min): More predictive; suppresses opening if storms approach later. Lower (30-45 min): Focuses solely on immediate conditions.",
+          "high_wind_speed": "Maximum sustained wind speed before closing windows for safety. Default: 18.0 mph. Higher (20-25 mph): Permits ventilation in breezier conditions. Lower (12-15 mph): Closes windows in gentle breezes to prevent drafts or door slamming.",
+          "high_wind_gust": "Maximum peak wind gust speed that immediately triggers a window close veto. Default: 25.0 mph. Higher (30-35 mph): Tolerates occasional gusty conditions. Lower (18-20 mph): Instantly locks windows closed upon any sudden gust.",
+          "max_precipitation_probability": "Forecast rain probability that triggers an automatic close veto. Default: 25.0%. Higher (35-45%): Tolerates slight chances of precipitation. Lower (10-15%): Strict rain protection; vetoes opening at any slight hint of rain."
         }
       },
       "circulation_settings": {
         "title": "Convective Circulation Guardrails",
         "description": "Configure temperature differential requirements, runtime limits, and stall detection for attic/basement convective cooling/heating.",
         "data": {
+          "upstairs_circ_enabled": "Enable Upstairs Convective Circulation",
+          "downstairs_circ_enabled": "Enable Downstairs Convective Circulation",
           "circulation_delta_threshold": "Minimum Temperature Differential (°F)",
           "circulation_min_minutes": "Minimum Run Time (Minutes)",
           "circulation_max_minutes": "Maximum Run Time (Minutes)",
           "circulation_stall_margin": "Stall Detection Margin (°F)",
           "circulation_lockout_hours": "Post-Stall Lockout Duration (Hours)"
+        },
+        "data_description": {
+          "upstairs_circ_enabled": "Automates HVAC fan circulation between Upstairs and Attic when thermal conditions are favorable. Requires attic temperature sensor.",
+          "downstairs_circ_enabled": "Automates HVAC fan circulation between Downstairs and Basement to harvest earth-cooled basement air. Requires basement temperature sensor.",
+          "circulation_delta_threshold": "Minimum temperature difference between living space and thermal reservoir (attic/basement) needed to start fan. Default: 4.0°F. Higher (5-6°F): Runs only during strong temperature splits for maximum heat transfer per watt. Lower (2.5-3°F): Runs more frequently with smaller differences.",
+          "circulation_min_minutes": "Anti-short-cycle duration. Fan runs for at least this duration once started. Default: 15 min. Higher (20-30 min): Protects blower motor from frequent cycling. Lower (10 min): Allows faster shutoff if reservoir depletes.",
+          "circulation_max_minutes": "Maximum continuous run time for a single circulation cycle. Default: 120 min. Higher (150-180 min): Allows extended circulation during long heatwaves. Lower (60-90 min): Prevents running if reservoir temperatures equalize.",
+          "circulation_stall_margin": "Thermal effectiveness check. After 20 minutes, if temperature change lags behind building model by this margin, cycle is flagged as stalled. Default: 0.2°F. Higher (0.3-0.4°F): Stricter; quickly stops ineffective circulation. Lower (0.1°F): More patient with heavy thermal mass.",
+          "circulation_lockout_hours": "Cooldown lockout period after a stalled run or maximum runtime, allowing the thermal reservoir to recharge. Default: 1 hour. Higher (2-3 hrs): Gives attic/basement more time to re-establish thermal separation. Lower (1 hr): Retries circulation sooner."
         }
       }
     }

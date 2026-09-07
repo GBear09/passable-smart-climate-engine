@@ -62,6 +62,8 @@ CONF_MAX_PRECIPITATION_PROBABILITY = "max_precipitation_probability"
 CONF_AQI_THRESHOLD = "aqi_threshold"
 
 # Configuration Keys - Circulation Guardrails
+CONF_UPSTAIRS_CIRC_ENABLED = "upstairs_circ_enabled"
+CONF_DOWNSTAIRS_CIRC_ENABLED = "downstairs_circ_enabled"
 CONF_CIRC_DELTA_THRESHOLD = "circulation_delta_threshold"
 CONF_CIRC_MIN_MINUTES = "circulation_min_minutes"
 CONF_CIRC_MAX_MINUTES = "circulation_max_minutes"

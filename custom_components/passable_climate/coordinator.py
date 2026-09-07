@@ -433,7 +433,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     pass
 
             # 3. Convective Circulation Management
-            if z_conf.get(CONF_CIRCULATION_ENABLED, False):
+            circ_enabled = self.options.get(
+                f"{z_key}_circ_enabled",
+                z_conf.get(CONF_CIRCULATION_ENABLED, False),
+            )
+            if circ_enabled:
                 source_temp_ent = z_conf.get(CONF_CIRCULATION_SOURCE_TEMP)
                 active_bool_ent = z_conf.get(CONF_CIRCULATION_ACTIVE_BOOLEAN)
                 eco_bool_ent = z_conf.get(CONF_CIRCULATION_ECO_BOOLEAN)

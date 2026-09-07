@@ -61,10 +61,12 @@ from .const import (
     CONF_SOLAR_POWER_ENTITY,
     CONF_SOLCAST_POWER_ENTITY,
     CONF_TEMP_SENSOR,
+    CONF_UPSTAIRS_CIRC_ENABLED,
     CONF_WEATHER_ENTITY,
     CONF_WINDOW_ECO_BOOLEAN,
     CONF_ZONE_NAME,
     CONF_ZONES,
+    CONF_DOWNSTAIRS_CIRC_ENABLED,
     DEFAULT_AQI_THRESHOLD,
     DEFAULT_BEDTIME_START,
     DEFAULT_CIRC_DELTA_THRESHOLD,
@@ -417,8 +419,22 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=new_options)
 
         opts = self.config_entry.options
+        data = self.config_entry.data
+        zones = data.get(CONF_ZONES, {})
+
+        upstairs_default = opts.get(
+            CONF_UPSTAIRS_CIRC_ENABLED,
+            zones.get("upstairs", {}).get(CONF_CIRCULATION_ENABLED, False),
+        )
+        downstairs_default = opts.get(
+            CONF_DOWNSTAIRS_CIRC_ENABLED,
+            zones.get("downstairs", {}).get(CONF_CIRCULATION_ENABLED, False),
+        )
+
         schema = vol.Schema(
             {
+                vol.Required(CONF_UPSTAIRS_CIRC_ENABLED, default=upstairs_default): selector.BooleanSelector(),
+                vol.Required(CONF_DOWNSTAIRS_CIRC_ENABLED, default=downstairs_default): selector.BooleanSelector(),
                 vol.Required(CONF_CIRC_DELTA_THRESHOLD, default=opts.get(CONF_CIRC_DELTA_THRESHOLD, DEFAULT_CIRC_DELTA_THRESHOLD)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=2.0, max=8.0, step=0.5, unit_of_measurement="°F")
                 ),
