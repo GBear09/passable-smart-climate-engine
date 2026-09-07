@@ -1,0 +1,128 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Environmental & Atmospheric Entities",
+        "description": "Select the outdoor weather provider, solar sensors, and home occupancy entities.",
+        "data": {
+          "weather_entity": "Weather Provider Entity",
+          "solar_power_entity": "Live Solar Power Generation Sensor",
+          "solcast_power_entity": "Solcast Forecast Power Sensor",
+          "home_mode_entity": "Home Mode Selector Entity",
+          "presence_entity": "Presence Detection Binary Sensor",
+          "aqi_entity": "Air Quality Index (AQI) Sensor (Optional)"
+        }
+      },
+      "influxdb": {
+        "title": "InfluxDB Historical Data Connection",
+        "description": "Enter your InfluxDB connection credentials for thermodynamic regression training. Connection will be verified automatically.",
+        "data": {
+          "influx_host": "InfluxDB Host",
+          "influx_port": "InfluxDB Port",
+          "influx_version": "InfluxDB API Version (1 or 2)",
+          "influx_database": "Database Name (v1)",
+          "influx_username": "Username (v1)",
+          "influx_password": "Password (v1)",
+          "influx_token": "API Token (v2)",
+          "influx_org": "Organization (v2)",
+          "influx_bucket": "Bucket (v2)"
+        }
+      },
+      "zones": {
+        "title": "Dual-Zone Climate & Circulation Mapping",
+        "description": "Configure thermostat, environmental sensors, and optional circulation fans for upstairs and downstairs zones.",
+        "data": {
+          "upstairs_climate": "Upstairs Thermostat",
+          "upstairs_temp": "Upstairs Temperature Sensor",
+          "upstairs_humidity": "Upstairs Humidity Sensor",
+          "upstairs_windows": "Upstairs Open Windows Count Sensor",
+          "upstairs_eco": "Upstairs Eco Mode Request Helper",
+          "upstairs_circ_enabled": "Enable Upstairs Convective Circulation",
+          "upstairs_attic_temp": "Attic Temperature Sensor",
+          "upstairs_circ_active": "Upstairs Circulation Active Indicator Helper",
+          "upstairs_circ_eco": "Upstairs Circulation Eco Helper",
+          "downstairs_climate": "Downstairs Thermostat",
+          "downstairs_temp": "Downstairs Temperature Sensor",
+          "downstairs_humidity": "Downstairs Humidity Sensor",
+          "downstairs_windows": "Downstairs Open Windows Count Sensor",
+          "downstairs_eco": "Downstairs Eco Mode Request Helper",
+          "downstairs_circ_enabled": "Enable Downstairs Convective Circulation",
+          "downstairs_basement_temp": "Basement Temperature Sensor",
+          "downstairs_circ_active": "Downstairs Circulation Active Indicator Helper",
+          "downstairs_circ_eco": "Downstairs Circulation Eco Helper"
+        }
+      },
+      "schedules_outputs": {
+        "title": "Schedules & Target Output Helpers",
+        "description": "Map bedtime schedules and output helpers for seamless backward compatibility with your existing dashboards and automations.",
+        "data": {
+          "bedtime_start_entity": "Child Bedtime Entity",
+          "parent_bedtime_entity": "Parent Bedtime Entity",
+          "morning_start_entity": "Morning Start Entity",
+          "comfort_profile_entity": "Comfort Profile Entity",
+          "recommendation_entity": "Overview Text Helper (e.g. input_text.comfort_profile_overview)",
+          "predict_heat_boolean": "Predict Heat Needed Boolean",
+          "prediction_message_text": "Prediction Message Text Helper",
+          "comfort_recovery_boolean": "Comfort Recovery Mode Boolean"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to InfluxDB with the provided credentials. Please verify host, port, and authentication."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Passable Smart Climate Tuning",
+        "menu_options": {
+          "thermodynamic_settings": "Thermodynamic & Enthalpy Deadbands",
+          "veto_settings": "Hazard Safety & Dwell Limits",
+          "circulation_settings": "Convective Circulation Guardrails"
+        }
+      },
+      "thermodynamic_settings": {
+        "title": "Thermodynamic & Enthalpy Deadbands",
+        "description": "Adjust minimum enthalpy advantage and temperature deadbands for window recommendations.",
+        "data": {
+          "min_enthalpy_delta": "Minimum Enthalpy Advantage (BTU/lb)",
+          "max_dew_point": "Maximum Outdoor Dew Point (°F)",
+          "open_temp_margin": "Open Window Target Margin (°F)",
+          "close_temp_margin": "Close Window Hysteresis Margin (°F)"
+        }
+      },
+      "veto_settings": {
+        "title": "Hazard Safety & Dwell Limits",
+        "description": "Configure safety thresholds for precipitation, high wind, and minimum open window dwell duration.",
+        "data": {
+          "open_dwell_minutes": "Minimum Window Open Dwell Duration (Minutes)",
+          "forecast_lookahead_minutes": "Hazard Forecast Lookahead Window (Minutes)",
+          "high_wind_speed": "High Sustained Wind Speed Limit (mph)",
+          "high_wind_gust": "High Wind Gust Limit (mph)",
+          "max_precipitation_probability": "Maximum Precipitation Probability (%)"
+        }
+      },
+      "circulation_settings": {
+        "title": "Convective Circulation Guardrails",
+        "description": "Configure temperature differential requirements, runtime limits, and stall detection for attic/basement convective cooling/heating.",
+        "data": {
+          "circulation_delta_threshold": "Minimum Temperature Differential (°F)",
+          "circulation_min_minutes": "Minimum Run Time (Minutes)",
+          "circulation_max_minutes": "Maximum Run Time (Minutes)",
+          "circulation_stall_margin": "Stall Detection Margin (°F)",
+          "circulation_lockout_hours": "Post-Stall Lockout Duration (Hours)"
+        }
+      }
+    }
+  },
+  "services": {
+    "retrain_models": {
+      "name": "Retrain Thermal Models",
+      "description": "Triggers an immediate asynchronous InfluxDB query and regression retraining of all 16 zone thermodynamic models."
+    },
+    "refresh_plan": {
+      "name": "Refresh Advisory & Simulation Plan",
+      "description": "Forces an immediate re-evaluation and forward micro-step simulation of window recommendations and circulation status."
+    }
+  }
+}

@@ -1,0 +1,7 @@
+retrain_models:
+  name: Retrain Thermal Models
+  description: Triggers an immediate asynchronous InfluxDB query and regression retraining of all 16 zone thermodynamic models.
+
+refresh_plan:
+  name: Refresh Advisory & Simulation Plan
+  description: Forces an immediate re-evaluation and forward micro-step simulation of window recommendations and circulation status.
