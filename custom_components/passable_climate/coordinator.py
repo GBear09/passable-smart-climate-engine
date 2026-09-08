@@ -281,6 +281,16 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.error("Model retraining failed: %s", err)
 
+    @staticmethod
+    def _parse_time(val: Any, default_hour: int, default_minute: int = 0) -> datetime.time:
+        if val and ":" in str(val):
+            try:
+                parts = str(val).strip().split(":")
+                return datetime.time(int(parts[0]), int(parts[1]))
+            except Exception:
+                pass
+        return datetime.time(default_hour, default_minute)
+
     def _get_val(self, entity_id: str | None, default: Any = None) -> Any:
         if not entity_id:
             return default
@@ -417,29 +427,17 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         parent_bedtime_ent = self.options.get(CONF_PARENT_BEDTIME, self.entry_data.get(CONF_PARENT_BEDTIME, DEFAULT_PARENT_BEDTIME))
         morning_start_ent = self.options.get(CONF_MORNING_START, self.entry_data.get(CONF_MORNING_START, DEFAULT_MORNING_START))
 
-        bedtime_start_hour = 18
-        parent_bedtime_hour = 20
-        morning_start_hour = 4
-        try:
-            b_val = self._get_val(bedtime_start_ent)
-            if b_val and ":" in str(b_val):
-                bedtime_start_hour = int(str(b_val).split(":")[0])
-            p_val = self._get_val(parent_bedtime_ent)
-            if p_val and ":" in str(p_val):
-                parent_bedtime_hour = int(str(p_val).split(":")[0])
-            m_val = self._get_val(morning_start_ent)
-            if m_val and ":" in str(m_val):
-                morning_start_hour = int(str(m_val).split(":")[0])
-        except Exception:
-            pass
+        bedtime_start_time = self._parse_time(self._get_val(bedtime_start_ent), 18, 0)
+        parent_bedtime_time = self._parse_time(self._get_val(parent_bedtime_ent), 20, 30)
+        morning_start_time = self._parse_time(self._get_val(morning_start_ent), 4, 30)
 
         phase_name, is_bedtime, is_evening = determine_temporal_phase(
             home_state=home_state_val,
             hvac_profile=hvac_profile_val,
             now=now,
-            bedtime_start_hour=bedtime_start_hour,
-            parent_bedtime_hour=parent_bedtime_hour,
-            morning_start_hour=morning_start_hour,
+            bedtime_start=bedtime_start_time,
+            parent_bedtime=parent_bedtime_time,
+            morning_start=morning_start_time,
         )
         self.current_phase = phase_name
         self.is_bedtime = is_bedtime
@@ -550,9 +548,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.current_scenario = "comfort_recovery_in_progress"
 
                 # Static closed plan for Card 0
-                sim_hours = 8
-                if is_bedtime:
-                    sim_hours = max(4, (morning_start_hour - now.hour) % 24)
+                m_dt = now.replace(hour=morning_start_time.hour, minute=morning_start_time.minute, second=0, microsecond=0)
+                if m_dt <= now:
+                    m_dt += datetime.timedelta(days=1)
+                sim_hours = max(4, int((m_dt - now).total_seconds() / 3600)) if is_bedtime else 8
                 recov_plan = run_static_simulation(
                     initial_temp=(up_temp + down_temp) / 2.0,
                     initial_humidity=(up_hum + down_hum) / 2.0,
@@ -635,10 +634,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 lon=lon,
                 is_bedtime=is_bedtime,
                 is_evening=is_evening,
-                parent_bedtime_hour=parent_bedtime_hour,
+                parent_bedtime=parent_bedtime_time,
+                bedtime_start=bedtime_start_time,
+                morning_start=morning_start_time,
                 active_heat_sp=act_heat,
                 active_cool_sp=act_cool,
-                morning_start_hour=morning_start_hour,
                 now=now,
                 solcast_forecast=solcast_forecast,
                 is_currently_open=is_open,

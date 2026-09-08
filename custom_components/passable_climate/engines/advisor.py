@@ -416,10 +416,13 @@ def evaluate_zone_plan(
     lon: float,
     is_bedtime: bool = False,
     is_evening: bool = False,
+    parent_bedtime: datetime.time | None = None,
+    bedtime_start: datetime.time | None = None,
+    morning_start: datetime.time | None = None,
     parent_bedtime_hour: int | None = None,
+    morning_start_hour: int = 4,
     active_heat_sp: float = 68.0,
     active_cool_sp: float = 75.0,
-    morning_start_hour: int = 4,
     now: datetime.datetime | None = None,
     solcast_forecast: list[dict[str, Any]] | None = None,
     is_currently_open: bool = False,
@@ -430,12 +433,8 @@ def evaluate_zone_plan(
     close_temp_margin: float = 0.2,
 ) -> ZonePlanResult:
     """Runs simulation and evaluates the optimal action plan for a zone.
-    Implements 100% parity with legacy smart_window_advisor.py including:
-    - Morning-bounded overnight lookahead
-    - 6 specialized bedtime / overnight scenarios
-    - Bedtime active purge and comfort recovery calculations
-    - Seasonal heat retention and heat blocking early returns
-    - Daytime peak benefit optimization and directionality vetoes
+    Implements 100% parity with legacy smart_window_advisor.py, with minute-precise
+    bedtime anchoring and fixed 24-hour rollover logic.
     """
     ref_now = now or datetime.datetime.now(datetime.timezone.utc)
     comfort_bounds_fn = lambda t: get_comfort_bounds(t, comfort_profile)
@@ -474,6 +473,13 @@ def evaluate_zone_plan(
 
     lower_bound, upper_bound = get_comfort_bounds(inside_temp, comfort_profile)
 
+    # Calculate exact morning target datetime
+    m_hour = morning_start.hour if morning_start else morning_start_hour
+    m_min = morning_start.minute if morning_start else 0
+    morning_dt = ref_now.replace(hour=m_hour, minute=m_min, second=0, microsecond=0)
+    if morning_dt <= ref_now:
+        morning_dt += datetime.timedelta(days=1)
+
     # =========================================================================
     # 1. Check Comfort Veto / Comfort Recovery
     # =========================================================================
@@ -486,13 +492,7 @@ def evaluate_zone_plan(
         )
 
     if is_uncomfortable and forecast:
-        hours_until_morning = 12
-        for i, hour_data in enumerate(forecast[:24]):
-            local_dt = _parse_local_dt(hour_data.get("datetime"), ref_now)
-            if local_dt.hour == morning_start_hour and i > 0:
-                hours_until_morning = i
-                break
-
+        hours_until_morning = max(1, int((morning_dt - ref_now).total_seconds() / 3600))
         sim_limit = max(12, hours_until_morning + 1)
         comfort_sim_forecast = forecast[:sim_limit]
 
@@ -742,7 +742,7 @@ def evaluate_zone_plan(
         for i, hour_data in enumerate(forecast):
             local_dt = _parse_local_dt(hour_data.get("datetime"), ref_now)
             overnight_forecast.append(hour_data)
-            if local_dt.hour == morning_start_hour and i > 0:
+            if local_dt >= morning_dt and i > 0:
                 break
 
         macro_override = False
@@ -843,11 +843,18 @@ def evaluate_zone_plan(
                         open_dt = _parse_local_dt(overnight_forecast[open_hour_idx].get("datetime"), ref_now)
                         target_time_str = _format_time(open_dt)
 
-                        if is_evening and parent_bedtime_hour is not None:
-                            pb_dt = ref_now.replace(hour=parent_bedtime_hour, minute=0, second=0, microsecond=0)
-                            if pb_dt < ref_now:
+                        if is_evening and (parent_bedtime is not None or parent_bedtime_hour is not None):
+                            pb_h = parent_bedtime.hour if parent_bedtime else (parent_bedtime_hour or 20)
+                            pb_m = parent_bedtime.minute if parent_bedtime else 30
+                            pb_dt = ref_now.replace(hour=pb_h, minute=pb_m, second=0, microsecond=0)
+                            bs_h = bedtime_start.hour if bedtime_start else 18
+                            if pb_h < bs_h and ref_now.hour >= bs_h:
                                 pb_dt += datetime.timedelta(days=1)
-                            if open_dt <= pb_dt:
+
+                            # FIXED: Only advise "before bed" if:
+                            # 1. We are currently before parent bedtime (ref_now < pb_dt)
+                            # 2. The opening window occurs BEFORE parent bedtime (open_dt <= pb_dt)
+                            if ref_now < pb_dt and open_dt <= pb_dt:
                                 return ZonePlanResult(
                                     recommended_state="Close Windows",
                                     details_message=f"Keep {zone_name} closed now. Open around {target_time_str} before bed.",

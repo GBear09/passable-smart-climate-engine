@@ -16,14 +16,14 @@ def determine_temporal_phase(
     home_state: str | None,
     hvac_profile: str | None,
     now: datetime.datetime,
-    bedtime_start_hour: int = 18,
-    parent_bedtime_hour: int = 20,
-    morning_start_hour: int = 4,
+    bedtime_start: datetime.time = datetime.time(18, 0),
+    parent_bedtime: datetime.time = datetime.time(20, 30),
+    morning_start: datetime.time = datetime.time(4, 30),
 ) -> tuple[str, bool, bool]:
     """Determines current temporal phase and returns (phase_name, is_bedtime, is_evening).
 
     Prioritizes explicit home state / profile helpers if set, falling back
-    to localized wall-clock hour thresholds.
+    to localized wall-clock hour and minute thresholds.
     """
     # 1. Explicit state checks
     if home_state == "Sleep" or (hvac_profile and "Sleep" in hvac_profile and "Pre-Sleep" not in hvac_profile):
@@ -32,24 +32,24 @@ def determine_temporal_phase(
         return PHASE_EVENING, False, True
 
     # 2. Time-of-day calculation fallback
+    now_time = now.time()
     is_bedtime = False
     is_evening = False
-    hour = now.hour
 
-    # Evening phase (e.g. 18:00 to 20:30)
-    if bedtime_start_hour > parent_bedtime_hour:
-        if hour >= bedtime_start_hour or hour < parent_bedtime_hour:
+    # Evening phase (between child bedtime and parent bedtime)
+    if bedtime_start > parent_bedtime:
+        if now_time >= bedtime_start or now_time < parent_bedtime:
             is_evening = True
     else:
-        if hour >= bedtime_start_hour and hour < parent_bedtime_hour:
+        if bedtime_start <= now_time < parent_bedtime:
             is_evening = True
 
-    # Bedtime phase (e.g. 20:30 to 04:30)
-    if parent_bedtime_hour > morning_start_hour:
-        if hour >= parent_bedtime_hour or hour < morning_start_hour:
+    # Bedtime phase (between parent bedtime and morning wakeup)
+    if parent_bedtime > morning_start:
+        if now_time >= parent_bedtime or now_time < morning_start:
             is_bedtime = True
     else:
-        if hour >= parent_bedtime_hour and hour < morning_start_hour:
+        if parent_bedtime <= now_time < morning_start:
             is_bedtime = True
 
     if is_bedtime:
