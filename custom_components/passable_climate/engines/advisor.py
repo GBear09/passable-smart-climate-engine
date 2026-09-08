@@ -87,35 +87,32 @@ def evaluate_environmental_vetoes(
     wind_speed: float | None,
     wind_gust: float | None,
     aqi_value: float | None,
-    home_mode: str | None,
-    someone_is_home: bool | None,
+    home_mode: str | None = None,
+    someone_is_home: bool | None = None,
     high_wind_speed: float = 18.0,
     high_wind_gust: float = 25.0,
     max_precip_prob: float = 25.0,
     aqi_threshold: float = 50.0,
+    **kwargs: Any,
 ) -> tuple[bool, str]:
-    """Evaluates environmental hazards and occupancy status.
+    """Evaluates environmental hazards (precipitation, high wind, AQI).
     Returns: (is_vetoed: bool, reason: str)
     """
-    # 1. Occupancy Veto
-    if home_mode in ["Away", "Vacation", "Armed Away"] or someone_is_home is False:
-        return True, "Windows must remain closed while the home is unoccupied."
-
-    # 2. Precipitation Veto
+    # 1. Precipitation Veto
     if weather_condition and weather_condition.lower() in BAD_WEATHER_CONDITIONS:
         return True, f"Hazardous weather condition ({weather_condition}). Keep windows closed."
 
     if precipitation_probability is not None and precipitation_probability >= max_precip_prob:
         return True, f"High precipitation probability ({round(precipitation_probability)}%). Keep windows closed."
 
-    # 3. Wind Hazard Veto
+    # 2. Wind Hazard Veto
     if wind_speed is not None and wind_speed >= high_wind_speed:
         return True, f"High sustained wind speed ({round(wind_speed, 1)} mph) causes severe interior drafts."
 
     if wind_gust is not None and wind_gust >= high_wind_gust:
         return True, f"High wind gusts ({round(wind_gust, 1)} mph) risk window or property damage."
 
-    # 4. Air Quality Veto
+    # 3. Air Quality Veto
     if aqi_value is not None and aqi_value >= aqi_threshold:
         return True, f"Unfavorable Air Quality Index (AQI {round(aqi_value)}). Keep windows closed."
 

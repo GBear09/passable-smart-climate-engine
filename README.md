@@ -18,7 +18,7 @@ Configure zones and atmospheric inputs seamlessly using the **Native UI Config F
 - **☀️ Cardinal Facade Solar Decomposition:** Computes direct and diffuse solar irradiance split into non-negative cardinal facade vectors ($I_{south}, I_{east}, I_{west}$) aligned with Solcast PV forecast curves.
 - **🤖 Thread-Safe In-Memory Machine Learning:** Automatically trains RANSAC robust 2D slope/intercept models and Ridge Multiple Linear Regression (MLR) models with alpha cross-validation from historical InfluxDB data inside thread-pool executors.
 - **🌀 Convective Thermal Circulation Manager:** Leverages attic and basement temperature differentials to naturally cool or heat living spaces, protected by anti-stall detection and an exponential-distance machine learning feedback loop.
-- **🚫 Multi-Tier Hazard & Occupancy Vetoes:** Instant safety gates for precipitation probability, high sustained wind ($>18\text{ mph}$), wind gusts ($>25\text{ mph}$), elevated AQI ($>50$), and unoccupied/Away states.
+- **🚫 Multi-Tier Weather Hazard Vetoes:** Instant safety gates for precipitation probability, high sustained wind ($>18\text{ mph}$), wind gusts ($>25\text{ mph}$), and elevated AQI ($>50$).
 - **📊 100% Lovelace Dashboard Compatibility:** Automatically registers the canonical 16 `sensor.plot_data_*` entities and `sensor.advisor_simulation_data` with exact attribute schemas, powering existing scatter plots, radar charts, and forward trajectory graphs with zero dashboard edits.
 
 ---
