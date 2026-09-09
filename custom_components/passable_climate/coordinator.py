@@ -199,6 +199,14 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if phase_helper not in entities_to_track:
                 entities_to_track.append(phase_helper)
 
+        # Track transition offset entity for reactive updates
+        offset_ent = self.options.get(
+            CONF_HVAC_TRANSITION_OFFSET,
+            self.entry_data.get(CONF_HVAC_TRANSITION_OFFSET, DEFAULT_HVAC_TRANSITION_OFFSET_ENTITY),
+        )
+        if offset_ent and isinstance(offset_ent, str) and "." in offset_ent and offset_ent not in entities_to_track:
+            entities_to_track.append(offset_ent)
+
         if entities_to_track:
             async def _handle_tracked_state_change(event: Any) -> None:
                 _LOGGER.debug("Reactive trigger from tracked entity %s; refreshing climate plan.", event.data.get("entity_id"))
@@ -788,7 +796,18 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if comfort_profile and comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
                 min_comfort_temp = min(comfort_profile["lower_profile"]["temperature_data_points"])
 
-            offset_val = float(self._get_val(CONF_HVAC_TRANSITION_OFFSET, DEFAULT_HVAC_TRANSITION_OFFSET) or 2.0)
+            offset_cfg = self.options.get(
+                CONF_HVAC_TRANSITION_OFFSET,
+                self.entry_data.get(CONF_HVAC_TRANSITION_OFFSET, DEFAULT_HVAC_TRANSITION_OFFSET_ENTITY),
+            )
+            try:
+                offset_val = float(offset_cfg)
+            except (ValueError, TypeError):
+                val_from_ent = self._get_val(offset_cfg, DEFAULT_HVAC_TRANSITION_OFFSET)
+                try:
+                    offset_val = float(val_from_ent)
+                except (ValueError, TypeError):
+                    offset_val = float(DEFAULT_HVAC_TRANSITION_OFFSET)
             predict_heat_ent = self.options.get(CONF_PREDICT_HEAT_BOOLEAN, self.entry_data.get(CONF_PREDICT_HEAT_BOOLEAN, DEFAULT_PREDICT_HEAT_BOOLEAN))
             predict_msg_ent = self.options.get(CONF_PREDICTION_MESSAGE_TEXT, self.entry_data.get(CONF_PREDICTION_MESSAGE_TEXT, DEFAULT_PREDICTION_MESSAGE_TEXT))
             is_prediction_on = (self._get_val(predict_heat_ent, "off") == "on")

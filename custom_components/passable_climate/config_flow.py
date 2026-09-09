@@ -35,6 +35,7 @@ from .const import (
     CONF_HIGH_WIND_SPEED,
     CONF_HOME_MODE_ENTITY,
     CONF_HUMIDITY_SENSOR,
+    CONF_HVAC_TRANSITION_OFFSET,
     CONF_INFLUX_BUCKET,
     CONF_INFLUX_DATABASE,
     CONF_INFLUX_HOST,
@@ -81,6 +82,7 @@ from .const import (
     DEFAULT_HIGH_WIND_GUST,
     DEFAULT_HIGH_WIND_SPEED,
     DEFAULT_HOME_MODE_ENTITY,
+    DEFAULT_HVAC_TRANSITION_OFFSET_ENTITY,
     DEFAULT_INFLUX_DATABASE,
     DEFAULT_INFLUX_HOST,
     DEFAULT_INFLUX_LOOKBACK_DAYS,
@@ -319,6 +321,9 @@ class SmartClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Required(CONF_PREDICTION_MESSAGE_TEXT, default=DEFAULT_PREDICTION_MESSAGE_TEXT): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="input_text")
+                ),
+                vol.Required(CONF_HVAC_TRANSITION_OFFSET, default=DEFAULT_HVAC_TRANSITION_OFFSET_ENTITY): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=["input_number", "number", "sensor"])
                 ),
                 vol.Required(CONF_COMFORT_RECOVERY_BOOLEAN, default=DEFAULT_COMFORT_RECOVERY_BOOLEAN): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="input_boolean")

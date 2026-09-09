@@ -63,6 +63,7 @@
           "recommendation_entity": "Overview Text Helper (e.g. input_text.comfort_profile_overview)",
           "predict_heat_boolean": "Predict Heat Needed Boolean",
           "prediction_message_text": "Prediction Message Text Helper",
+          "hvac_transition_offset_entity": "HVAC Transition Offset Helper",
           "comfort_recovery_boolean": "Comfort Recovery Mode Boolean"
         }
       }
