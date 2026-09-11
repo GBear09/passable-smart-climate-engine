@@ -542,6 +542,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 preset_sleep_heat=sleep_heat,
                 protect_cool=protect_cool,
                 protect_heat=protect_heat,
+                outdoor_temp=w_temp,
+                home_mode=home_mode,
             )
             zone_setpoints[z_key] = (act_heat, act_cool)
 
@@ -846,9 +848,18 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # 7. Bedtime Overnight Heat Prediction Alert
         self.heat_prediction_alert = False
-        if is_bedtime and (overall_hvac_mode in ["cool", "off"]) and avg_hist:
-            min_comfort_temp = float(self.comfort_settings.get(CONF_COMFORT_TEMP_MIN, 66.0))
-            if comfort_profile:
+        is_alt_sleep = (self._get_val("input_boolean.sleeping_in_living_room", "off") == "on")
+        eval_hist = avg_hist
+        if not is_alt_sleep and up_plan and up_plan.history:
+            eval_hist = up_plan.history
+
+        if is_bedtime and (overall_hvac_mode in ["cool", "off"]) and eval_hist:
+            min_comfort_temp = float(self.comfort_settings.get(CONF_COMFORT_TEMP_MIN, 64.5))
+            if not is_alt_sleep:
+                up_sleep_heat = self._get_val("input_number.hvac_preset_upstairs_sleep_heat")
+                if up_sleep_heat is not None:
+                    min_comfort_temp = float(up_sleep_heat)
+            elif comfort_profile:
                 if "temp_min" in comfort_profile:
                     min_comfort_temp = float(comfort_profile["temp_min"])
                 elif comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
@@ -874,7 +885,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             first_breach_time: str | None = None
             first_breach_temp: float | None = None
-            for idx, pt in enumerate(avg_hist):
+            for idx, pt in enumerate(eval_hist):
                 if pt["temp"] < transition_threshold and idx < len(forecast_list):
                     dt_raw = forecast_list[idx].get("datetime")
                     if dt_raw:
@@ -886,8 +897,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if first_breach_time:
                 self.heat_prediction_alert = True
+                area_str = "the bedrooms" if not is_alt_sleep else "the house"
                 msg = (
-                    f"The advisor predicts the house will get cold enough to require heat overnight "
+                    f"The advisor predicts {area_str} will get cold enough to require heat overnight "
                     f"(dropping to {first_breach_temp:.1f}°F around {first_breach_time}). "
                     f"Would you like to turn the heat on now?"
                 )

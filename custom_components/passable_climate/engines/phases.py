@@ -73,12 +73,16 @@ def resolve_zone_setpoints(
     preset_sleep_heat: float | None = None,
     protect_cool: float | None = None,
     protect_heat: float | None = None,
+    outdoor_temp: float | None = None,
+    freeze_threshold: float = 10.0,
+    heat_threshold: float = 95.0,
+    home_mode: str = "Home",
 ) -> tuple[float, float]:
     """Resolves active heating and cooling setpoints using the Dual-Source Setpoint Hierarchy.
 
     Avoids the eco-setback circular dependency by trusting the thermostat only
     when normal comfort mode is active, falling back to phase-aware presets when
-    eco-mode or HVAC is off, and applying hard protection clamping.
+    eco-mode or HVAC is off, and applying conditional protection clamping on extreme weather.
 
     Returns: (active_heat_sp, active_cool_sp)
     """
@@ -112,10 +116,13 @@ def resolve_zone_setpoints(
             act_heat = base_heat
             act_cool = base_cool
 
-    # Hard protection clamping
-    if protect_cool is not None:
-        act_cool = min(act_cool, protect_cool)
-    if protect_heat is not None:
+    # Conditional protection clamping for extreme weather
+    freeze_risk = (outdoor_temp is not None and outdoor_temp < freeze_threshold)
+    heat_risk = (outdoor_temp is not None and outdoor_temp > heat_threshold and home_mode == "Away")
+
+    if freeze_risk and protect_heat is not None:
         act_heat = max(act_heat, protect_heat)
+    if heat_risk and protect_cool is not None:
+        act_cool = min(act_cool, protect_cool)
 
     return act_heat, act_cool
