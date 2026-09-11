@@ -221,10 +221,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Reactive listener for manual circulation toggle switches
         circ_bools: list[str] = []
         for z_key, z_conf in zones_config.items():
-            if z_conf.get(CONF_CIRCULATION_ENABLED, False):
-                act_ent = z_conf.get(CONF_CIRCULATION_ACTIVE_BOOLEAN)
-                if act_ent and act_ent not in circ_bools:
-                    circ_bools.append(act_ent)
+            act_ent = z_conf.get(CONF_CIRCULATION_ACTIVE_BOOLEAN)
+            if act_ent and act_ent not in circ_bools:
+                circ_bools.append(act_ent)
 
         if circ_bools:
             async def _handle_circ_toggle(event: Any) -> None:
@@ -239,28 +238,41 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         eco_e = z_c.get(CONF_CIRCULATION_ECO_BOOLEAN)
                         temp_e = z_c.get(CONF_TEMP_SENSOR)
                         now_u = dt_util.utcnow()
+                        is_running = self.circulation_manager.state_memory[z_k].get("start_time") is not None
+
                         if new_state.state == "on":
-                            _LOGGER.info("Passable Smart Climate: Manual toggle ON for %s circulation.", z_k)
-                            if climate_e:
-                                await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "on"})
-                            if eco_e:
-                                await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": eco_e})
-                            in_t = float(self._get_val(temp_e, 70.0) or 70.0)
-                            if not self.circulation_manager.state_memory[z_k].get("start_time"):
+                            if not is_running:
+                                _LOGGER.info("Passable Smart Climate: Manual toggle ON for %s circulation.", z_k)
+                                if climate_e:
+                                    await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "on"})
+                                if eco_e:
+                                    await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": eco_e})
+                                in_t = float(self._get_val(temp_e, 70.0) or 70.0)
+                                self.circulation_manager.state_memory[z_k]["lockout_until"] = None
                                 self.circulation_manager.state_memory[z_k]["start_time"] = now_u
                                 self.circulation_manager.state_memory[z_k]["start_temp"] = in_t
                                 self.circulation_manager.state_memory[z_k]["mode"] = "cool" if (self._get_val(climate_e, "cool") == "cool") else "heat"
                                 await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                                await self.async_request_refresh()
                         elif new_state.state == "off":
-                            _LOGGER.info("Passable Smart Climate: Manual toggle OFF for %s circulation.", z_k)
-                            if climate_e:
-                                await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "auto"})
-                            if eco_e:
-                                await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_e})
-                            self.circulation_manager.state_memory[z_k]["start_time"] = None
-                            self.circulation_manager.state_memory[z_k]["start_temp"] = None
-                            self.circulation_manager.state_memory[z_k]["mode"] = None
-                            await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                            if is_running:
+                                _LOGGER.info("Passable Smart Climate: Manual toggle OFF for %s circulation.", z_k)
+                                if climate_e:
+                                    await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "auto"})
+                                if eco_e:
+                                    await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_e})
+                                lockout_h = float(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS))
+                                self.circulation_manager.state_memory[z_k]["lockout_until"] = now_u + datetime.timedelta(hours=lockout_h)
+                                self.circulation_manager.state_memory[z_k]["start_time"] = None
+                                self.circulation_manager.state_memory[z_k]["start_temp"] = None
+                                self.circulation_manager.state_memory[z_k]["mode"] = None
+                                await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                                await self.async_request_refresh()
+                            else:
+                                if climate_e:
+                                    await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "auto"})
+                                if eco_e:
+                                    await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_e})
 
             self._unsub_circ = async_track_state_change_event(
                 self.hass, circ_bools, _handle_circ_toggle
@@ -720,31 +732,31 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if circ_action == "turn_on" and not fan_is_active:
                     _LOGGER.info("Passable Smart Climate: Engaging circulation fan for %s.", z_name)
+                    self.circulation_manager.state_memory[z_key]["start_time"] = now_utc
+                    self.circulation_manager.state_memory[z_key]["start_temp"] = in_temp
+                    self.circulation_manager.state_memory[z_key]["mode"] = "cool" if (c_st == "cool" or in_temp > act_cool) else "heat"
+                    await self._learning_store.async_save(self.circulation_manager.export_learning_data())
                     if active_bool_ent:
                         await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": active_bool_ent})
                     if eco_bool_ent:
                         await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": eco_bool_ent})
                     if climate_ent:
                         await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "on"})
-                    self.circulation_manager.state_memory[z_key]["start_time"] = now_utc
-                    self.circulation_manager.state_memory[z_key]["start_temp"] = in_temp
-                    self.circulation_manager.state_memory[z_key]["mode"] = "cool" if (c_st == "cool" or in_temp > act_cool) else "heat"
-                    await self._learning_store.async_save(self.circulation_manager.export_learning_data())
 
                 elif circ_action == "turn_off" and fan_is_active:
                     _LOGGER.info("Passable Smart Climate: Shutting off circulation fan for %s.", z_name)
-                    if active_bool_ent:
-                        await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": active_bool_ent})
-                    if eco_bool_ent:
-                        await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_bool_ent})
-                    if climate_ent:
-                        await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "auto"})
                     if lockout > 0:
                         self.circulation_manager.state_memory[z_key]["lockout_until"] = now_utc + datetime.timedelta(hours=lockout)
                     self.circulation_manager.state_memory[z_key]["start_time"] = None
                     self.circulation_manager.state_memory[z_key]["start_temp"] = None
                     self.circulation_manager.state_memory[z_key]["mode"] = None
                     await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                    if active_bool_ent:
+                        await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": active_bool_ent})
+                    if eco_bool_ent:
+                        await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_bool_ent})
+                    if climate_ent:
+                        await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "auto"})
 
         if any_recovery_triggered and recovery_bool_ent:
             try:
