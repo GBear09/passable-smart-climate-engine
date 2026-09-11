@@ -30,8 +30,13 @@ from .const import (
     CONF_CIRCULATION_SOURCE_TEMP,
     CONF_CLIMATE_ENTITY,
     CONF_CLOSE_TEMP_MARGIN,
+    CONF_COMFORT_DEW_POINT_MAX,
+    CONF_COMFORT_HUMIDITY_MAX,
+    CONF_COMFORT_HUMIDITY_MIN,
     CONF_COMFORT_PROFILE,
     CONF_COMFORT_RECOVERY_BOOLEAN,
+    CONF_COMFORT_TEMP_MAX,
+    CONF_COMFORT_TEMP_MIN,
     CONF_FORECAST_LOOKAHEAD_MINUTES,
     CONF_HIGH_WIND_GUST,
     CONF_HIGH_WIND_SPEED,
@@ -67,8 +72,14 @@ from .const import (
     DEFAULT_CIRC_MIN_MINUTES,
     DEFAULT_CIRC_STALL_MARGIN,
     DEFAULT_CLOSE_TEMP_MARGIN,
+    DEFAULT_COMFORT_DEW_POINT_MAX,
+    DEFAULT_COMFORT_HUMIDITY_MAX,
+    DEFAULT_COMFORT_HUMIDITY_MIN,
     DEFAULT_COMFORT_PROFILE_ENTITY,
     DEFAULT_COMFORT_RECOVERY_BOOLEAN,
+    DEFAULT_COMFORT_ROLLOFF_TEMP,
+    DEFAULT_COMFORT_TEMP_MAX,
+    DEFAULT_COMFORT_TEMP_MIN,
     DEFAULT_FORECAST_LOOKAHEAD_MINUTES,
     DEFAULT_HIGH_WIND_GUST,
     DEFAULT_HIGH_WIND_SPEED,
@@ -161,6 +172,21 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.heat_prediction_alert: bool = False
         self.comfort_recovery_active: bool = False
         self._last_bad_weather_time: str | None = None
+
+        # Psychrometric Box Comfort Envelope Parameters
+        self.comfort_settings: dict[str, float] = {
+            CONF_COMFORT_TEMP_MIN: DEFAULT_COMFORT_TEMP_MIN,
+            CONF_COMFORT_TEMP_MAX: DEFAULT_COMFORT_TEMP_MAX,
+            CONF_COMFORT_HUMIDITY_MIN: DEFAULT_COMFORT_HUMIDITY_MIN,
+            CONF_COMFORT_HUMIDITY_MAX: DEFAULT_COMFORT_HUMIDITY_MAX,
+            CONF_COMFORT_DEW_POINT_MAX: DEFAULT_COMFORT_DEW_POINT_MAX,
+        }
+
+    async def async_set_comfort_param(self, param_key: str, value: float) -> None:
+        """Updates a psychrometric comfort envelope parameter and triggers an immediate refresh."""
+        self.comfort_settings[param_key] = float(value)
+        _LOGGER.debug("Updated comfort setting %s = %.1f; refreshing coordinator.", param_key, value)
+        await self.async_refresh()
 
     async def async_initialize(self) -> None:
         """Loads cached models and circulation learning data from Home Assistant storage."""
@@ -433,15 +459,33 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for item in solcast_forecast:
                 item["power"] = item["power"] * solar_trans_ratio
 
-        # Comfort Profile Polynomial Bounds
-        comfort_profile: dict[str, Any] | None = None
+        # Comfort Profile Resolution (Native Psychrometric Box with Legacy Fallback)
+        comfort_profile: dict[str, Any] = {
+            "type": "psychrometric_box",
+            "temp_min": self.comfort_settings[CONF_COMFORT_TEMP_MIN],
+            "temp_max": self.comfort_settings[CONF_COMFORT_TEMP_MAX],
+            "humidity_min": self.comfort_settings[CONF_COMFORT_HUMIDITY_MIN],
+            "humidity_max": self.comfort_settings[CONF_COMFORT_HUMIDITY_MAX],
+            "dew_point_max": self.comfort_settings[CONF_COMFORT_DEW_POINT_MAX],
+            "roll_off_temp": DEFAULT_COMFORT_ROLLOFF_TEMP,
+            "lower_profile": {
+                "temperature_data_points": [self.comfort_settings[CONF_COMFORT_TEMP_MIN]],
+                "humidity_data_points": [self.comfort_settings[CONF_COMFORT_HUMIDITY_MIN]],
+            },
+            "upper_profile": {
+                "temperature_data_points": [self.comfort_settings[CONF_COMFORT_TEMP_MAX]],
+                "humidity_data_points": [self.comfort_settings[CONF_COMFORT_HUMIDITY_MAX]],
+            },
+        }
         if comfort_profile_ent:
             cp_st = self.hass.states.get(comfort_profile_ent)
-            if cp_st:
-                comfort_profile = {
-                    "upper_profile": cp_st.attributes.get("upper_profile"),
-                    "lower_profile": cp_st.attributes.get("lower_profile"),
-                }
+            if cp_st and cp_st.attributes.get("upper_profile") and cp_st.attributes.get("lower_profile"):
+                up_attr = cp_st.attributes.get("upper_profile")
+                if isinstance(up_attr, dict) and "a" in up_attr and up_attr.get("a") is not None:
+                    comfort_profile = {
+                        "upper_profile": up_attr,
+                        "lower_profile": cp_st.attributes.get("lower_profile"),
+                    }
 
         # 2. Temporal Phasing Detection
         home_state_val = self._get_val("input_select.home_state")
@@ -611,7 +655,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 5. Dual-Zone Evaluation
         zone_plans: dict[str, ZonePlanResult] = {}
         min_enthalpy = float(self.options.get(CONF_MIN_ENTHALPY_DELTA, DEFAULT_MIN_ENTHALPY_DELTA))
-        max_dp = float(self.options.get(CONF_MAX_DEW_POINT, DEFAULT_MAX_DEW_POINT))
+        max_dp = float(self.comfort_settings.get(CONF_COMFORT_DEW_POINT_MAX, self.options.get(CONF_MAX_DEW_POINT, DEFAULT_MAX_DEW_POINT)))
         open_margin = float(self.options.get(CONF_OPEN_TEMP_MARGIN, DEFAULT_OPEN_TEMP_MARGIN))
         close_margin = float(self.options.get(CONF_CLOSE_TEMP_MARGIN, DEFAULT_CLOSE_TEMP_MARGIN))
 
@@ -815,9 +859,12 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 7. Bedtime Overnight Heat Prediction Alert
         self.heat_prediction_alert = False
         if is_bedtime and (overall_hvac_mode in ["cool", "off"]) and avg_hist:
-            min_comfort_temp = 68.0
-            if comfort_profile and comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
-                min_comfort_temp = min(comfort_profile["lower_profile"]["temperature_data_points"])
+            min_comfort_temp = float(self.comfort_settings.get(CONF_COMFORT_TEMP_MIN, 66.0))
+            if comfort_profile:
+                if "temp_min" in comfort_profile:
+                    min_comfort_temp = float(comfort_profile["temp_min"])
+                elif comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
+                    min_comfort_temp = min(comfort_profile["lower_profile"]["temperature_data_points"])
 
             offset_cfg = self.options.get(
                 CONF_HVAC_TRANSITION_OFFSET,

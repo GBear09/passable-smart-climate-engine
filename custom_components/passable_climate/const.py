@@ -3,7 +3,7 @@
 from homeassistant.const import Platform
 
 DOMAIN = "passable_climate"
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER]
 
 # Configuration Keys - Environment
 CONF_WEATHER_ENTITY = "weather_entity"
@@ -50,6 +50,13 @@ CONF_PREDICTION_MESSAGE_TEXT = "prediction_message_text"
 CONF_COMFORT_RECOVERY_BOOLEAN = "comfort_recovery_boolean"
 CONF_HVAC_TRANSITION_OFFSET = "hvac_transition_offset_entity"
 
+# Configuration Keys - Psychrometric Box Comfort Envelope
+CONF_COMFORT_TEMP_MIN = "comfort_temp_min"
+CONF_COMFORT_TEMP_MAX = "comfort_temp_max"
+CONF_COMFORT_HUMIDITY_MIN = "comfort_humidity_min"
+CONF_COMFORT_HUMIDITY_MAX = "comfort_humidity_max"
+CONF_COMFORT_DEW_POINT_MAX = "comfort_dew_point_max"
+
 # Configuration Keys - Thermodynamic & Veto Thresholds
 CONF_MIN_ENTHALPY_DELTA = "min_enthalpy_delta"
 CONF_MAX_DEW_POINT = "max_dew_point"
@@ -89,6 +96,14 @@ DEFAULT_PREDICTION_MESSAGE_TEXT = "input_text.hvac_advisor_prediction_message"
 DEFAULT_COMFORT_RECOVERY_BOOLEAN = "input_boolean.hvac_advisor_comfort_recovery_mode"
 DEFAULT_HVAC_TRANSITION_OFFSET_ENTITY = "input_number.hvac_transition_offset"
 DEFAULT_HVAC_TRANSITION_OFFSET = 2.0
+
+# Defaults - Psychrometric Box Comfort Envelope
+DEFAULT_COMFORT_TEMP_MIN = 66.0
+DEFAULT_COMFORT_TEMP_MAX = 76.0
+DEFAULT_COMFORT_HUMIDITY_MIN = 25.0
+DEFAULT_COMFORT_HUMIDITY_MAX = 60.0
+DEFAULT_COMFORT_DEW_POINT_MAX = 58.0
+DEFAULT_COMFORT_ROLLOFF_TEMP = 75.0
 
 # Defaults - Thresholds
 DEFAULT_MIN_ENTHALPY_DELTA = 1.2

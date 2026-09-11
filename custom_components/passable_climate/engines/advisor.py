@@ -200,7 +200,7 @@ def is_outside_air_favorable(
 
     # 1. Dew Point Humidity Envelope Clamp (prevents mugginess)
     if dp_out > dew_point_ceiling and hvac_mode == "cool":
-        return False, f"Outdoor dew point ({dp_out:.1f}°F) introduces unacceptable latent load."
+        return False, f"Outdoor dew point ({dp_out:.1f}°F) introduces unacceptable latent load (limit: {dew_point_ceiling:.1f}°F)."
 
     # 2. Projected RH Comfort Bounds Check
     if inside_upper_bound is not None:
@@ -252,10 +252,51 @@ def get_comfort_bounds(
     temp_f: float,
     comfort_profile: dict[str, Any] | None,
 ) -> tuple[float | None, float | None]:
-    """Calculates polynomial comfort humidity lower and upper bounds for a given temperature."""
+    """Calculates psychrometric box (or legacy polynomial) comfort humidity lower and upper bounds for a given temperature."""
     if not comfort_profile:
         return None, None
 
+    # 1. Psychrometric Box Formulation
+    if comfort_profile.get("type") == "psychrometric_box" or "temp_min" in comfort_profile:
+        temp_min = float(comfort_profile.get("temp_min", 66.0))
+        temp_max = float(comfort_profile.get("temp_max", 76.0))
+        hum_min = float(comfort_profile.get("humidity_min", 25.0))
+        hum_max = float(comfort_profile.get("humidity_max", 60.0))
+        dp_max = float(comfort_profile.get("dew_point_max", 58.0))
+        roll_off_temp = float(comfort_profile.get("roll_off_temp", min(75.0, temp_max)))
+
+        # Upper Bound
+        if temp_f <= roll_off_temp:
+            dp_rh = PsychrometricEngine.projected_rh(dp_max, 100.0, temp_f)
+            upper_bound = min(hum_max, dp_rh)
+        else:
+            # Linear roll-off to 20.0% at temp_max
+            dp_rh_at_rolloff = PsychrometricEngine.projected_rh(dp_max, 100.0, roll_off_temp)
+            rh_at_rolloff = min(hum_max, dp_rh_at_rolloff)
+            target_rh_at_max = 20.0
+            if temp_max > roll_off_temp:
+                slope = (target_rh_at_max - rh_at_rolloff) / (temp_max - roll_off_temp)
+                upper_bound = rh_at_rolloff + slope * (temp_f - roll_off_temp)
+            else:
+                upper_bound = target_rh_at_max
+
+        # Lower Bound
+        if temp_f >= 70.0:
+            lower_bound = hum_min
+        elif temp_f >= temp_min:
+            slope = (hum_min - 50.0) / (70.0 - temp_min)
+            lower_bound = 50.0 + slope * (temp_f - temp_min)
+        else:
+            lower_bound = 50.0
+
+        lower_bound = max(15.0, min(80.0, lower_bound))
+        upper_bound = max(20.0, min(85.0, upper_bound))
+        if lower_bound > upper_bound:
+            lower_bound = upper_bound
+
+        return lower_bound, upper_bound
+
+    # 2. Legacy Polynomial Fallback
     upper = comfort_profile.get("upper_profile")
     lower = comfort_profile.get("lower_profile")
     if not upper or not lower:
@@ -354,8 +395,11 @@ def determine_seasonal_mode(
     else:
         avg_temp = sum(float(f["temperature"]) for f in lookahead_forecast) / len(lookahead_forecast)
         min_comfort = 68.0
-        if comfort_profile and comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
-            min_comfort = min(comfort_profile["lower_profile"]["temperature_data_points"])
+        if comfort_profile:
+            if "temp_min" in comfort_profile:
+                min_comfort = float(comfort_profile["temp_min"])
+            elif comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
+                min_comfort = min(comfort_profile["lower_profile"]["temperature_data_points"])
 
         if hvac_mode == "cool" and avg_temp < min_comfort:
             candidate_mode = "fall_transition"
@@ -434,6 +478,8 @@ def evaluate_zone_plan(
     bedtime anchoring and fixed 24-hour rollover logic.
     """
     ref_now = now or datetime.datetime.now(datetime.timezone.utc)
+    if comfort_profile and "dew_point_max" in comfort_profile:
+        max_dew_point = float(comfort_profile["dew_point_max"])
     comfort_bounds_fn = lambda t: get_comfort_bounds(t, comfort_profile)
 
     evaluator_fn = lambda **kwargs: is_outside_air_favorable(
