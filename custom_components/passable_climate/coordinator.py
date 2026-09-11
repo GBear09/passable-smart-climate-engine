@@ -18,6 +18,7 @@ from .const import (
     CONF_AQI_ENTITY,
     CONF_AQI_THRESHOLD,
     CONF_BEDTIME_START,
+    CONF_CIRC_COOLDOWN_MINUTES,
     CONF_CIRC_DELTA_THRESHOLD,
     CONF_CIRC_LOCKOUT_HOURS,
     CONF_CIRC_MAX_MINUTES,
@@ -59,6 +60,7 @@ from .const import (
     CONF_ZONES,
     DEFAULT_AQI_THRESHOLD,
     DEFAULT_BEDTIME_START,
+    DEFAULT_CIRC_COOLDOWN_MINUTES,
     DEFAULT_CIRC_DELTA_THRESHOLD,
     DEFAULT_CIRC_LOCKOUT_HOURS,
     DEFAULT_CIRC_MAX_MINUTES,
@@ -247,6 +249,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if not self.circulation_manager.state_memory[z_k].get("start_time"):
                                 self.circulation_manager.state_memory[z_k]["start_time"] = now_u
                                 self.circulation_manager.state_memory[z_k]["start_temp"] = in_t
+                                self.circulation_manager.state_memory[z_k]["mode"] = "cool" if (self._get_val(climate_e, "cool") == "cool") else "heat"
                                 await self._learning_store.async_save(self.circulation_manager.export_learning_data())
                         elif new_state.state == "off":
                             _LOGGER.info("Passable Smart Climate: Manual toggle OFF for %s circulation.", z_k)
@@ -256,6 +259,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": eco_e})
                             self.circulation_manager.state_memory[z_k]["start_time"] = None
                             self.circulation_manager.state_memory[z_k]["start_temp"] = None
+                            self.circulation_manager.state_memory[z_k]["mode"] = None
                             await self._learning_store.async_save(self.circulation_manager.export_learning_data())
 
             self._unsub_circ = async_track_state_change_event(
@@ -468,8 +472,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if c_state in ["cool", "heat"]:
                 overall_hvac_mode = c_state
 
-            eco_bool_ent = z_conf.get(CONF_WINDOW_ECO_BOOLEAN, f"input_boolean.eco_mode_request_{z_key}_hvac_advisor")
-            eco_active = (self._get_val(eco_bool_ent, "off") == "on")
+            window_eco = (self._get_val(z_conf.get(CONF_WINDOW_ECO_BOOLEAN, f"input_boolean.eco_mode_request_{z_key}_hvac_advisor"), "off") == "on")
+            circ_eco = (self._get_val(z_conf.get(CONF_CIRCULATION_ECO_BOOLEAN), "off") == "on")
+            circ_act = (self._get_val(z_conf.get(CONF_CIRCULATION_ACTIVE_BOOLEAN), "off") == "on")
+            floor_eco = (self._get_val(f"input_boolean.eco_mode_{z_key}", "off") == "on")
+            eco_active = window_eco or circ_eco or circ_act or floor_eco
 
             home_cool = float(self._get_val(f"input_number.hvac_preset_{z_key}_home_cool", 74.0) or 74.0)
             home_heat = float(self._get_val(f"input_number.hvac_preset_{z_key}_home_heat", 68.0) or 68.0)
@@ -689,6 +696,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 source_temp = float(self._get_val(source_temp_ent, in_temp) or in_temp)
                 fan_is_active = (self._get_val(active_bool_ent, "off") == "on")
 
+                cooldown_mins = float(self.options.get(CONF_CIRC_COOLDOWN_MINUTES, DEFAULT_CIRC_COOLDOWN_MINUTES))
                 circ_action, lockout = self.circulation_manager.evaluate_circulation(
                     z_key=z_key,
                     area_temp=in_temp,
@@ -706,7 +714,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     min_runtime_minutes=int(self.options.get(CONF_CIRC_MIN_MINUTES, DEFAULT_CIRC_MIN_MINUTES)),
                     max_runtime_minutes=int(self.options.get(CONF_CIRC_MAX_MINUTES, DEFAULT_CIRC_MAX_MINUTES)),
                     stall_margin=float(self.options.get(CONF_CIRC_STALL_MARGIN, DEFAULT_CIRC_STALL_MARGIN)),
-                    lockout_hours=int(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)),
+                    lockout_hours=float(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)),
+                    cooldown_hours=cooldown_mins / 60.0,
                 )
 
                 if circ_action == "turn_on" and not fan_is_active:
@@ -719,6 +728,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "on"})
                     self.circulation_manager.state_memory[z_key]["start_time"] = now_utc
                     self.circulation_manager.state_memory[z_key]["start_temp"] = in_temp
+                    self.circulation_manager.state_memory[z_key]["mode"] = "cool" if (c_st == "cool" or in_temp > act_cool) else "heat"
                     await self._learning_store.async_save(self.circulation_manager.export_learning_data())
 
                 elif circ_action == "turn_off" and fan_is_active:
@@ -733,6 +743,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self.circulation_manager.state_memory[z_key]["lockout_until"] = now_utc + datetime.timedelta(hours=lockout)
                     self.circulation_manager.state_memory[z_key]["start_time"] = None
                     self.circulation_manager.state_memory[z_key]["start_temp"] = None
+                    self.circulation_manager.state_memory[z_key]["mode"] = None
                     await self._learning_store.async_save(self.circulation_manager.export_learning_data())
 
         if any_recovery_triggered and recovery_bool_ent:

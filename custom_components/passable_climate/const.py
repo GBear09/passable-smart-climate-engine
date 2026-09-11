@@ -70,6 +70,7 @@ CONF_CIRC_MIN_MINUTES = "circulation_min_minutes"
 CONF_CIRC_MAX_MINUTES = "circulation_max_minutes"
 CONF_CIRC_STALL_MARGIN = "circulation_stall_margin"
 CONF_CIRC_LOCKOUT_HOURS = "circulation_lockout_hours"
+CONF_CIRC_COOLDOWN_MINUTES = "circulation_cooldown_minutes"
 
 # Defaults - Sensors & Entities
 DEFAULT_WEATHER_ENTITY = "weather.home"
@@ -106,6 +107,7 @@ DEFAULT_CIRC_MIN_MINUTES = 15
 DEFAULT_CIRC_MAX_MINUTES = 120
 DEFAULT_CIRC_STALL_MARGIN = 0.2
 DEFAULT_CIRC_LOCKOUT_HOURS = 1
+DEFAULT_CIRC_COOLDOWN_MINUTES = 30
 
 DEFAULT_INFLUX_HOST = "localhost"
 DEFAULT_INFLUX_PORT = 8086

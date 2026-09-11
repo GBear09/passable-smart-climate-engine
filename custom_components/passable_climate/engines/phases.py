@@ -103,7 +103,9 @@ def resolve_zone_setpoints(
             act_heat = float(climate_attrs.get("target_temp_low") or base_heat)
             act_cool = float(climate_attrs.get("target_temp_high") or base_cool)
     else:
-        if is_bedtime or is_evening:
+        # In evening (pre-sleep), upstairs transitions to sleep presets early (kids),
+        # while downstairs stays on home presets until actual bedtime.
+        if is_bedtime or (is_evening and zone_id == "upstairs"):
             act_heat = preset_sleep_heat if preset_sleep_heat is not None else base_heat
             act_cool = preset_sleep_cool if preset_sleep_cool is not None else base_cool
         else:
