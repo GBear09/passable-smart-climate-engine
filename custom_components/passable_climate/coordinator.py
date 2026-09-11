@@ -218,9 +218,6 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if win_ent and win_ent not in entities_to_track:
                 entities_to_track.append(win_ent)
 
-        cp_ent = self.options.get(CONF_COMFORT_PROFILE, self.entry_data.get(CONF_COMFORT_PROFILE, DEFAULT_COMFORT_PROFILE_ENTITY))
-        if cp_ent and cp_ent not in entities_to_track:
-            entities_to_track.append(cp_ent)
 
         # Track home state and profile helpers for instant reactive phase updates
         for phase_helper in ["input_select.home_state", "input_text.hvac_active_profile"]:
@@ -477,15 +474,6 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "humidity_data_points": [self.comfort_settings[CONF_COMFORT_HUMIDITY_MAX]],
             },
         }
-        if comfort_profile_ent:
-            cp_st = self.hass.states.get(comfort_profile_ent)
-            if cp_st and cp_st.attributes.get("upper_profile") and cp_st.attributes.get("lower_profile"):
-                up_attr = cp_st.attributes.get("upper_profile")
-                if isinstance(up_attr, dict) and "a" in up_attr and up_attr.get("a") is not None:
-                    comfort_profile = {
-                        "upper_profile": up_attr,
-                        "lower_profile": cp_st.attributes.get("lower_profile"),
-                    }
 
         # 2. Temporal Phasing Detection
         home_state_val = self._get_val("input_select.home_state")

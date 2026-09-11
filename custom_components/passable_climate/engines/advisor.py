@@ -270,10 +270,10 @@ def get_comfort_bounds(
             dp_rh = PsychrometricEngine.projected_rh(dp_max, 100.0, temp_f)
             upper_bound = min(hum_max, dp_rh)
         else:
-            # Linear roll-off to 20.0% at temp_max
+            # Linear roll-off to hum_min at temp_max
             dp_rh_at_rolloff = PsychrometricEngine.projected_rh(dp_max, 100.0, roll_off_temp)
             rh_at_rolloff = min(hum_max, dp_rh_at_rolloff)
-            target_rh_at_max = 20.0
+            target_rh_at_max = hum_min
             if temp_max > roll_off_temp:
                 slope = (target_rh_at_max - rh_at_rolloff) / (temp_max - roll_off_temp)
                 upper_bound = rh_at_rolloff + slope * (temp_f - roll_off_temp)
