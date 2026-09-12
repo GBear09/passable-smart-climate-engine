@@ -8,5 +8,5 @@
   "integration_type": "service",
   "iot_class": "calculated",
   "requirements": ["numpy>=1.26.0", "requests>=2.31.0"],
-  "version": "1.0.17"
+  "version": "1.0.18"
 }

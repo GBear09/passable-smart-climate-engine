@@ -265,20 +265,16 @@ def get_comfort_bounds(
         dp_max = float(comfort_profile.get("dew_point_max", 58.0))
         roll_off_temp = float(comfort_profile.get("roll_off_temp", min(75.0, temp_max)))
 
-        # Upper Bound
-        if temp_f <= roll_off_temp:
-            dp_rh = PsychrometricEngine.projected_rh(dp_max, 100.0, temp_f)
-            upper_bound = min(hum_max, dp_rh)
-        else:
-            # Linear roll-off to hum_min at temp_max
-            dp_rh_at_rolloff = PsychrometricEngine.projected_rh(dp_max, 100.0, roll_off_temp)
-            rh_at_rolloff = min(hum_max, dp_rh_at_rolloff)
-            target_rh_at_max = hum_min
-            if temp_max > roll_off_temp:
-                slope = (target_rh_at_max - rh_at_rolloff) / (temp_max - roll_off_temp)
-                upper_bound = rh_at_rolloff + slope * (temp_f - roll_off_temp)
-            else:
-                upper_bound = target_rh_at_max
+        # Upper Bound: Psychrometric dew point ceiling + mold cap
+        dp_rh = PsychrometricEngine.projected_rh(dp_max, 100.0, temp_f)
+        upper_bound = min(hum_max, dp_rh)
+
+        # If roll-off is desired above roll_off_temp, roll off gently toward a reasonable comfort floor (e.g. 45% RH at temp_max), never to hum_min
+        if temp_f > roll_off_temp and temp_max > (roll_off_temp + 2.0):
+            target_rh_at_max = max(45.0, hum_min + 15.0)
+            rh_at_rolloff = min(hum_max, PsychrometricEngine.projected_rh(dp_max, 100.0, roll_off_temp))
+            slope = (target_rh_at_max - rh_at_rolloff) / (temp_max - roll_off_temp)
+            upper_bound = min(upper_bound, rh_at_rolloff + slope * (temp_f - roll_off_temp))
 
         # Lower Bound
         if temp_f >= 70.0:
@@ -290,7 +286,7 @@ def get_comfort_bounds(
             lower_bound = 50.0
 
         lower_bound = max(15.0, min(80.0, lower_bound))
-        upper_bound = max(20.0, min(85.0, upper_bound))
+        upper_bound = max(40.0, min(85.0, upper_bound))
         if lower_bound > upper_bound:
             lower_bound = upper_bound
 
@@ -682,22 +678,23 @@ def evaluate_zone_plan(
     # =========================================================================
     # 2. Check Seasonal Override (Early Returns)
     # =========================================================================
-    if seasonal_mode in ["fall_transition", "coldsnap_prep"]:
+    if not is_bedtime and seasonal_mode in ["fall_transition", "coldsnap_prep"]:
         threshold = inside_temp if is_currently_open else inside_temp + 0.5
         if current_outside_temp < threshold:
+            eco_flag = (hvac_mode == "heat")
             return ZonePlanResult(
                 recommended_state="Close Windows",
                 details_message=f"Keep {zone_name} closed to trap free heat.",
                 history=closed_baseline,
                 actions=[SimulationAction("closed", len(forecast[:12]))],
-                eco_mode_requested=True,
+                eco_mode_requested=eco_flag,
                 scenario="fall_trap_heat",
             )
 
-    if seasonal_mode in ["spring_transition", "heatwave_prep"]:
+    if not is_bedtime and seasonal_mode in ["spring_transition", "heatwave_prep"]:
         threshold = inside_temp if is_currently_open else inside_temp - 0.5
         if current_outside_temp > threshold:
-            eco_flag = (seasonal_mode == "spring_transition")
+            eco_flag = (seasonal_mode == "spring_transition" and hvac_mode == "cool")
             return ZonePlanResult(
                 recommended_state="Close Windows",
                 details_message=f"Keep {zone_name} closed to block outside heat.",
