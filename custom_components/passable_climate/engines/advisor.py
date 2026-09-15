@@ -579,9 +579,14 @@ def evaluate_zone_plan(
         if upper_bound is not None and inside_humidity > upper_bound:
             if recovery_hour is not None and recovery_hour <= hours_until_morning:
                 display_hours = max(1, recovery_hour)
+                action_str = "passively dehumidify" if inside_temp <= safe_max_temp else "passively cool and dehumidify"
+                action_verb = "dehumidify" if inside_temp <= safe_max_temp else "cool"
+
                 if recov_actions and recov_actions[0].action == "open":
                     idx = min(recov_actions[0].hours - 1, len(recov_history) - 1)
                     idx = max(0, idx)
+                    final_open_temp = recov_history[idx]["temp"]
+
                     if recov_closed and len(recov_closed) > idx and recov_closed[idx]["temp"] < recov_history[idx]["temp"]:
                         return ZonePlanResult(
                             recommended_state="Close Windows",
@@ -591,9 +596,34 @@ def evaluate_zone_plan(
                             eco_mode_requested=False,
                             scenario="comfort_recovery",
                         )
+
+                    # Clamp in Fall Transition / Heating regime against dumping heat
+                    if (seasonal_mode in ["fall_transition", "coldsnap_prep"] or hvac_mode == "heat") and (
+                        final_open_temp < active_heat_sp or final_open_temp <= safe_min_temp
+                    ):
+                        return ZonePlanResult(
+                            recommended_state="Close Windows",
+                            details_message=f"Keep {zone_name} closed to trap free heat. Outdoor air ({current_outside_temp:.1f}°F) is too cool for passive moisture recovery without dropping below heating threshold ({active_heat_sp:.1f}°F).",
+                            history=recov_closed,
+                            actions=[SimulationAction("closed", 1)],
+                            eco_mode_requested=False,
+                            scenario="fall_trap_heat",
+                        )
+
+                    # Absolute safe minimum temperature clamp in any regime
+                    if final_open_temp <= safe_min_temp:
+                        return ZonePlanResult(
+                            recommended_state="Close Windows",
+                            details_message=f"Keep {zone_name} windows closed. Opening them would over-cool the space below {safe_min_temp:.1f}°F.",
+                            history=recov_closed,
+                            actions=[SimulationAction("closed", 1)],
+                            eco_mode_requested=False,
+                            scenario="overcooling",
+                        )
+
                     return ZonePlanResult(
                         recommended_state="Open Windows",
-                        details_message=f"Open {zone_name} windows to passively cool. Comfort will be restored in ~{display_hours} hour(s).{_get_temp_change_msg(inside_temp, recov_history, recov_actions, recov_closed)}",
+                        details_message=f"Open {zone_name} windows to {action_str}. Comfort will be restored in ~{display_hours} hour(s).{_get_temp_change_msg(inside_temp, recov_history, recov_actions, recov_closed)}",
                         history=recov_history,
                         actions=recov_actions,
                         eco_mode_requested=False,
@@ -602,13 +632,19 @@ def evaluate_zone_plan(
                     )
                 else:
                     change_dt_str = None
-                    if len(recov_actions) > 1 and recov_actions[0].action == "closed" and recov_actions[1].action == "open":
+                    if (
+                        len(recov_actions) > 1
+                        and recov_actions[0].action == "closed"
+                        and recov_actions[1].action == "open"
+                        and recov_actions[0].hours <= 3
+                        and seasonal_mode not in ["fall_transition", "coldsnap_prep"]
+                    ):
                         change_dt = _parse_local_dt(comfort_sim_forecast[recov_actions[0].hours].get("datetime"), ref_now)
                         change_dt_str = _format_time(change_dt)
                     msg = (
-                        f"Keep {zone_name} windows closed for now, open around {change_dt_str} to passively cool. Comfort restored in ~{display_hours} hour(s)."
+                        f"Keep {zone_name} windows closed for now, open around {change_dt_str} to passively {action_verb}. Comfort restored in ~{display_hours} hour(s)."
                         if change_dt_str
-                        else f"Keep {zone_name} windows closed. Passive cooling will restore comfort in ~{display_hours} hour(s)."
+                        else f"Keep {zone_name} windows closed. Passive {action_verb}ing will restore comfort in ~{display_hours} hour(s)."
                     )
                     return ZonePlanResult(
                         recommended_state="Close Windows",
@@ -634,10 +670,41 @@ def evaluate_zone_plan(
         elif not is_bedtime and lower_bound is not None and inside_humidity < lower_bound:
             if recovery_hour is not None and recovery_hour <= hours_until_morning:
                 display_hours = max(1, recovery_hour)
+                hum_action_str = "passively humidify" if inside_temp >= safe_min_temp else "passively heat and humidify"
+                hum_verb = "humidify" if inside_temp >= safe_min_temp else "heat"
+
                 if recov_actions and recov_actions[0].action == "open":
+                    idx = min(recov_actions[0].hours - 1, len(recov_history) - 1)
+                    idx = max(0, idx)
+                    final_open_temp = recov_history[idx]["temp"]
+
+                    # Clamp in Spring Transition / Cooling regime against overheating
+                    if (seasonal_mode in ["spring_transition", "heatwave_prep"] or hvac_mode == "cool") and (
+                        final_open_temp > active_cool_sp or final_open_temp >= safe_max_temp
+                    ):
+                        return ZonePlanResult(
+                            recommended_state="Close Windows",
+                            details_message=f"Keep {zone_name} closed to block outside heat. Outdoor air ({current_outside_temp:.1f}°F) is too warm for passive humidification without exceeding cooling threshold ({active_cool_sp:.1f}°F).",
+                            history=recov_closed,
+                            actions=[SimulationAction("closed", 1)],
+                            eco_mode_requested=False,
+                            scenario="block_outside_heat",
+                        )
+
+                    # Absolute safe maximum temperature clamp in any regime
+                    if final_open_temp >= safe_max_temp:
+                        return ZonePlanResult(
+                            recommended_state="Close Windows",
+                            details_message=f"Keep {zone_name} windows closed. Opening them would overheat the space above {safe_max_temp:.1f}°F.",
+                            history=recov_closed,
+                            actions=[SimulationAction("closed", 1)],
+                            eco_mode_requested=False,
+                            scenario="overheating",
+                        )
+
                     return ZonePlanResult(
                         recommended_state="Open Windows",
-                        details_message=f"Open {zone_name} windows to passively heat. Comfort will be restored in ~{display_hours} hour(s).{_get_temp_change_msg(inside_temp, recov_history, recov_actions, recov_closed)}",
+                        details_message=f"Open {zone_name} windows to {hum_action_str}. Comfort will be restored in ~{display_hours} hour(s).{_get_temp_change_msg(inside_temp, recov_history, recov_actions, recov_closed)}",
                         history=recov_history,
                         actions=recov_actions,
                         eco_mode_requested=False,
@@ -646,13 +713,19 @@ def evaluate_zone_plan(
                     )
                 else:
                     change_dt_str = None
-                    if len(recov_actions) > 1 and recov_actions[0].action == "closed" and recov_actions[1].action == "open":
+                    if (
+                        len(recov_actions) > 1
+                        and recov_actions[0].action == "closed"
+                        and recov_actions[1].action == "open"
+                        and recov_actions[0].hours <= 3
+                        and seasonal_mode not in ["spring_transition", "heatwave_prep"]
+                    ):
                         change_dt = _parse_local_dt(comfort_sim_forecast[recov_actions[0].hours].get("datetime"), ref_now)
                         change_dt_str = _format_time(change_dt)
                     msg = (
-                        f"Keep {zone_name} windows closed for now, open around {change_dt_str} to passively heat. Comfort restored in ~{display_hours} hour(s)."
+                        f"Keep {zone_name} windows closed for now, open around {change_dt_str} to passively {hum_verb}. Comfort restored in ~{display_hours} hour(s)."
                         if change_dt_str
-                        else f"Keep {zone_name} windows closed. Passive heating will restore comfort in ~{display_hours} hour(s)."
+                        else f"Keep {zone_name} windows closed. Passive {hum_verb}ing will restore comfort in ~{display_hours} hour(s)."
                     )
                     return ZonePlanResult(
                         recommended_state="Close Windows",
@@ -1133,18 +1206,28 @@ def evaluate_zone_plan(
             predicted_temp=predicted_temp,
         )
     else:
-        if len(actions) > 1 and actions[0].hours < len(sim_forecast):
-            change_dt = _parse_local_dt(sim_forecast[actions[0].hours].get("datetime"), ref_now)
-            target_time_str = _format_time(change_dt)
-            return ZonePlanResult(
-                recommended_state="Close Windows",
-                details_message=f"Keep {zone_name} windows closed {close_reason}. Open around {target_time_str} {open_reason}.",
-                history=history,
-                actions=actions,
-                eco_mode_requested=eco_mode_on,
-                scenario="closed_with_open_target",
-                target_time=target_time_str,
+        if len(actions) > 1 and actions[0].hours < len(sim_forecast) and actions[0].hours <= 3:
+            target_idx = actions[0].hours
+            target_outside = float(sim_forecast[target_idx].get("temperature", inside_temp))
+            suppress_open_target = (
+                seasonal_mode in ["fall_transition", "coldsnap_prep"]
+                and target_outside <= inside_temp
+            ) or (
+                seasonal_mode in ["spring_transition", "heatwave_prep"]
+                and target_outside >= inside_temp
             )
+            if not suppress_open_target:
+                change_dt = _parse_local_dt(sim_forecast[target_idx].get("datetime"), ref_now)
+                target_time_str = _format_time(change_dt)
+                return ZonePlanResult(
+                    recommended_state="Close Windows",
+                    details_message=f"Keep {zone_name} windows closed {close_reason}. Open around {target_time_str} {open_reason}.",
+                    history=history,
+                    actions=actions,
+                    eco_mode_requested=eco_mode_on,
+                    scenario="closed_with_open_target",
+                    target_time=target_time_str,
+                )
 
         return ZonePlanResult(
             recommended_state="Close Windows",

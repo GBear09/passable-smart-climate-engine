@@ -54,6 +54,7 @@ from .const import (
     CONF_PARENT_BEDTIME,
     CONF_PREDICT_HEAT_BOOLEAN,
     CONF_PREDICTION_MESSAGE_TEXT,
+    CONF_PREEMPTIVE_ECO_MODE,
     CONF_PRESENCE_ENTITY,
     CONF_RECOMMENDATION_ENTITY,
     CONF_SOLAR_POWER_ENTITY,
@@ -95,6 +96,7 @@ from .const import (
     DEFAULT_PARENT_BEDTIME,
     DEFAULT_PREDICT_HEAT_BOOLEAN,
     DEFAULT_PREDICTION_MESSAGE_TEXT,
+    DEFAULT_PREEMPTIVE_ECO_MODE,
     DEFAULT_PRESENCE_ENTITY,
     DEFAULT_RECOMMENDATION_ENTITY,
     DEFAULT_SOLAR_POWER_ENTITY,
@@ -172,6 +174,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.heat_prediction_alert: bool = False
         self.comfort_recovery_active: bool = False
         self._last_bad_weather_time: str | None = None
+        self._last_open_recommendation_time: datetime.datetime | None = None
 
         # Psychrometric Box Comfort Envelope Parameters
         self.comfort_settings: dict[str, float] = {
@@ -399,7 +402,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Environmental & Occupancy Veto Check
         home_mode = self._get_val(home_mode_ent, "Home")
         someone_is_home = (self._get_val(presence_ent, "on") == "on")
-        precip_prob = float(forecast_list[0].get("precipitation_probability", 0.0)) if forecast_list else 0.0
+        lookahead_mins = float(self.options.get(CONF_FORECAST_LOOKAHEAD_MINUTES, DEFAULT_FORECAST_LOOKAHEAD_MINUTES))
+        lookahead_hours = max(1, int(round(lookahead_mins / 60.0)))
+        scan_forecast = forecast_list[:lookahead_hours] if forecast_list else []
+        precip_prob = max([float(f.get("precipitation_probability", 0.0) or 0.0) for f in scan_forecast]) if scan_forecast else 0.0
         aqi_val = None
         aqi_ent = self.options.get(CONF_AQI_ENTITY, self.entry_data.get(CONF_AQI_ENTITY))
         if aqi_ent:
@@ -421,6 +427,15 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             max_precip_prob=float(self.options.get(CONF_MAX_PRECIPITATION_PROBABILITY, DEFAULT_MAX_PRECIPITATION_PROBABILITY)),
             aqi_threshold=float(self.options.get(CONF_AQI_THRESHOLD, DEFAULT_AQI_THRESHOLD)),
         )
+
+        if not is_vetoed and scan_forecast:
+            for f_item in scan_forecast:
+                f_cond = str(f_item.get("condition", "")).lower()
+                if f_cond in BAD_WEATHER_CONDITIONS:
+                    is_vetoed = True
+                    veto_reason = f"Impending bad weather ({f_cond}) within {int(lookahead_mins)} min forecast"
+                    break
+
         self.is_hazard_vetoed = is_vetoed
         self.hazard_veto_reason = veto_reason
 
@@ -553,15 +568,19 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         global_active_heat = (up_sp[0] + down_sp[0]) / 2.0
         global_active_cool = (up_sp[1] + down_sp[1]) / 2.0
 
-        seasonal_mode, seasonal_details = determine_seasonal_mode(
-            hvac_mode=overall_hvac_mode,
-            forecast=forecast_list,
-            comfort_profile=comfort_profile,
-            active_heat_sp=global_active_heat,
-            active_cool_sp=global_active_cool,
-        )
-        self.seasonal_mode = seasonal_mode
-        self.seasonal_details = seasonal_details
+        if len(forecast_list) >= 24:
+            seasonal_mode, seasonal_details = determine_seasonal_mode(
+                hvac_mode=overall_hvac_mode,
+                forecast=forecast_list,
+                comfort_profile=comfort_profile,
+                active_heat_sp=global_active_heat,
+                active_cool_sp=global_active_cool,
+            )
+            self.seasonal_mode = seasonal_mode
+            self.seasonal_details = seasonal_details
+        else:
+            seasonal_mode = self.seasonal_mode
+            seasonal_details = self.seasonal_details
 
         # 4. Tier 0: Global Comfort Recovery Handling
         recovery_bool_ent = self.options.get(CONF_COMFORT_RECOVERY_BOOLEAN, self.entry_data.get(CONF_COMFORT_RECOVERY_BOOLEAN, DEFAULT_COMFORT_RECOVERY_BOOLEAN))
@@ -724,7 +743,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             eco_bool = z_conf.get(CONF_WINDOW_ECO_BOOLEAN, f"input_boolean.eco_mode_request_{z_key}_hvac_advisor")
             if eco_bool:
                 try:
-                    target_svc = "turn_on" if plan.eco_mode_requested else "turn_off"
+                    preemptive_eco = bool(self.options.get(CONF_PREEMPTIVE_ECO_MODE, DEFAULT_PREEMPTIVE_ECO_MODE))
+                    target_svc = "turn_on" if (plan.eco_mode_requested and preemptive_eco) else "turn_off"
                     await self.hass.services.async_call("input_boolean", target_svc, {"entity_id": eco_bool})
                 except Exception:
                     pass
@@ -803,7 +823,29 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # 6. Combined Whole-House Formulation & Markdown Details
         any_open = any(p.recommended_state == "Open Windows" for p in zone_plans.values())
-        final_state = "Open Windows" if any_open else "Close Windows"
+        raw_state = "Open Windows" if any_open else "Close Windows"
+        open_dwell_mins = float(self.options.get(CONF_OPEN_DWELL_MINUTES, self.entry_data.get(CONF_OPEN_DWELL_MINUTES, DEFAULT_OPEN_DWELL_MINUTES)))
+        dwell_held = False
+
+        if is_vetoed:
+            final_state = "Close Windows"
+            self._last_open_recommendation_time = None
+        elif raw_state == "Open Windows":
+            final_state = "Open Windows"
+            if self.last_recommendation != "Open Windows":
+                self._last_open_recommendation_time = now_utc
+        elif self.last_recommendation == "Open Windows" and self._last_open_recommendation_time is not None:
+            elapsed_sec = (now_utc - self._last_open_recommendation_time).total_seconds()
+            if elapsed_sec < (open_dwell_mins * 60):
+                final_state = "Open Windows"
+                dwell_held = True
+            else:
+                final_state = "Close Windows"
+                self._last_open_recommendation_time = None
+        else:
+            final_state = "Close Windows"
+            self._last_open_recommendation_time = None
+
         self.last_recommendation = final_state
 
         ts_str = now.strftime("%-I:%M %p on %b %-d")
@@ -831,6 +873,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if seasonal_details:
             details += f"\n\n{seasonal_details}"
+
+        if dwell_held and self._last_open_recommendation_time is not None:
+            rem_m = max(1, int(round((open_dwell_mins * 60 - (now_utc - self._last_open_recommendation_time).total_seconds()) / 60.0)))
+            details += f"\n\n*(Open window recommendation held active by {int(open_dwell_mins)}-minute anti-flapping latch; ~{rem_m} min remaining)*"
 
         # Average history for Card 0 trajectory plot
         avg_hist: list[dict[str, float]] = []

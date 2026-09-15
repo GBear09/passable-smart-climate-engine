@@ -106,14 +106,16 @@
           "forecast_lookahead_minutes": "Hazard Forecast Lookahead Window (Minutes)",
           "high_wind_speed": "High Sustained Wind Speed Limit (mph)",
           "high_wind_gust": "High Wind Gust Limit (mph)",
-          "max_precipitation_probability": "Maximum Precipitation Probability (%)"
+          "max_precipitation_probability": "Maximum Precipitation Probability (%)",
+          "preemptive_eco_mode": "Enable Pre-emptive HVAC Eco Mode"
         },
         "data_description": {
           "open_dwell_minutes": "Anti-flapping latch time. Once open windows are recommended, this recommendation is held for at least this duration. Default: 45 min. Higher (60-90 min): Minimizes notification flapping. Lower (15-30 min): Reacts quicker to rapidly changing weather.",
           "forecast_lookahead_minutes": "Forward forecast window scanned for upcoming rain, wind, or adverse conditions. Default: 60 min. Higher (90-120 min): More predictive; suppresses opening if storms approach later. Lower (30-45 min): Focuses solely on immediate conditions.",
           "high_wind_speed": "Maximum sustained wind speed before closing windows for safety. Default: 18.0 mph. Higher (20-25 mph): Permits ventilation in breezier conditions. Lower (12-15 mph): Closes windows in gentle breezes to prevent drafts or door slamming.",
           "high_wind_gust": "Maximum peak wind gust speed that immediately triggers a window close veto. Default: 25.0 mph. Higher (30-35 mph): Tolerates occasional gusty conditions. Lower (18-20 mph): Instantly locks windows closed upon any sudden gust.",
-          "max_precipitation_probability": "Forecast rain probability that triggers an automatic close veto. Default: 25.0%. Higher (35-45%): Tolerates slight chances of precipitation. Lower (10-15%): Strict rain protection; vetoes opening at any slight hint of rain."
+          "max_precipitation_probability": "Forecast rain probability that triggers an automatic close veto. Default: 25.0%. Higher (35-45%): Tolerates slight chances of precipitation. Lower (10-15%): Strict rain protection; vetoes opening at any slight hint of rain.",
+          "preemptive_eco_mode": "When enabled, the advisor automatically requests HVAC Eco Mode as soon as open windows are recommended. When disabled (default), Eco Mode is only engaged reactively once physical window contact sensors detect that windows are actually open."
         }
       },
       "circulation_settings": {

@@ -57,6 +57,7 @@ from .const import (
     CONF_PARENT_BEDTIME,
     CONF_PREDICT_HEAT_BOOLEAN,
     CONF_PREDICTION_MESSAGE_TEXT,
+    CONF_PREEMPTIVE_ECO_MODE,
     CONF_PRESENCE_ENTITY,
     CONF_RECOMMENDATION_ENTITY,
     CONF_SOLAR_POWER_ENTITY,
@@ -98,6 +99,7 @@ from .const import (
     DEFAULT_PARENT_BEDTIME,
     DEFAULT_PREDICT_HEAT_BOOLEAN,
     DEFAULT_PREDICTION_MESSAGE_TEXT,
+    DEFAULT_PREEMPTIVE_ECO_MODE,
     DEFAULT_PRESENCE_ENTITY,
     DEFAULT_RECOMMENDATION_ENTITY,
     DEFAULT_SOLAR_POWER_ENTITY,
@@ -413,6 +415,7 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(CONF_MAX_PRECIPITATION_PROBABILITY, default=opts.get(CONF_MAX_PRECIPITATION_PROBABILITY, DEFAULT_MAX_PRECIPITATION_PROBABILITY)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10.0, max=50.0, step=5.0, unit_of_measurement="%")
                 ),
+                vol.Required(CONF_PREEMPTIVE_ECO_MODE, default=opts.get(CONF_PREEMPTIVE_ECO_MODE, DEFAULT_PREEMPTIVE_ECO_MODE)): selector.BooleanSelector(),
             }
         )
         return self.async_show_form(step_id="veto_settings", data_schema=schema)
