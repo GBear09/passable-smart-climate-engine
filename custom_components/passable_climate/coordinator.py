@@ -582,84 +582,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             seasonal_mode = self.seasonal_mode
             seasonal_details = self.seasonal_details
 
-        # 4. Tier 0: Global Comfort Recovery Handling
+        # 4. Comfort Recovery Mode State
         recovery_bool_ent = self.options.get(CONF_COMFORT_RECOVERY_BOOLEAN, self.entry_data.get(CONF_COMFORT_RECOVERY_BOOLEAN, DEFAULT_COMFORT_RECOVERY_BOOLEAN))
         is_recovery_on = (self._get_val(recovery_bool_ent, "off") == "on")
         self.comfort_recovery_active = is_recovery_on
-
-        up_conf = zones_config.get("upstairs", {})
-        down_conf = zones_config.get("downstairs", {})
-        up_temp = float(self._get_val(up_conf.get(CONF_TEMP_SENSOR), 72.0) or 72.0)
-        down_temp = float(self._get_val(down_conf.get(CONF_TEMP_SENSOR), 72.0) or 72.0)
-        up_hum = float(self._get_val(up_conf.get(CONF_HUMIDITY_SENSOR), 50.0) or 50.0)
-        down_hum = float(self._get_val(down_conf.get(CONF_HUMIDITY_SENSOR), 50.0) or 50.0)
-
-        if is_recovery_on:
-            avg_temp = (up_temp + down_temp) / 2.0
-            target = global_active_heat if overall_hvac_mode == "heat" else global_active_cool if overall_hvac_mode == "cool" else None
-            is_restored = False
-            if target:
-                if abs(avg_temp - target) <= 0.25:
-                    is_restored = True
-                elif overall_hvac_mode == "cool" and avg_temp < target:
-                    is_restored = True
-                elif overall_hvac_mode == "heat" and avg_temp > target:
-                    is_restored = True
-
-            if is_restored:
-                _LOGGER.info("Passable Smart Climate: Comfort recovered to target (%.1f°F). Disengaging recovery mode.", target or 72.0)
-                await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": recovery_bool_ent})
-                self.comfort_recovery_active = False
-            else:
-                # Force all zone window eco modes off so HVAC runs full power
-                for z_c in zones_config.values():
-                    e_b = z_c.get(CONF_WINDOW_ECO_BOOLEAN)
-                    if e_b:
-                        await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": e_b})
-
-                ts_str = now.strftime("%-I:%M %p on %b %-d")
-                recovery_details = (
-                    f"**Action Plan as of {ts_str}:**\n\n"
-                    f"**Comfort recovery in progress.**\n"
-                    f"HVAC is running to reach the target of **{target:.1f}°F**."
-                )
-                self.last_recommendation = "Close Windows"
-                self.last_details = recovery_details
-                self.current_scenario = "comfort_recovery_in_progress"
-
-                # Static closed plan for Card 0
-                m_dt = now.replace(hour=morning_start_time.hour, minute=morning_start_time.minute, second=0, microsecond=0)
-                if m_dt <= now:
-                    m_dt += datetime.timedelta(days=1)
-                sim_hours = max(4, int((m_dt - now).total_seconds() / 3600)) if is_bedtime else 8
-                recov_plan = run_static_simulation(
-                    initial_temp=(up_temp + down_temp) / 2.0,
-                    initial_humidity=(up_hum + down_hum) / 2.0,
-                    forecast=forecast_list[:sim_hours],
-                    model_temp=self.models.get("upstairs_temp_profile_win_closed"),
-                    model_hum=self.models.get("upstairs_humidity_profile_win_closed"),
-                    strategy="closed",
-                    lat=lat,
-                    lon=lon,
-                    solcast_forecast=solcast_forecast,
-                )
-                self.last_plan_history = recov_plan
-
-                rec_ent = self.options.get(CONF_RECOMMENDATION_ENTITY, self.entry_data.get(CONF_RECOMMENDATION_ENTITY, DEFAULT_RECOMMENDATION_ENTITY))
-                if rec_ent:
-                    try:
-                        await self.hass.services.async_call("input_text", "set_value", {"entity_id": rec_ent, "value": "Close Windows"})
-                        self.hass.states.async_set(rec_ent, "Close Windows", {"details": recovery_details})
-                    except Exception:
-                        pass
-
-                return {
-                    "state": "Close Windows",
-                    "details": recovery_details,
-                    "history": recov_plan,
-                    "is_vetoed": False,
-                    "veto_reason": "",
-                }
 
         # 5. Dual-Zone Evaluation
         zone_plans: dict[str, ZonePlanResult] = {}
@@ -734,7 +660,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if is_vetoed:
                 plan.recommended_state = "Close Windows"
-                plan.details_message = f"Keep {z_name} windows closed ({veto_reason})"
+                plan.details_message = f"Keep {z_name} windows closed ({veto_reason})."
                 plan.scenario = "hazard_vetoed"
 
             zone_plans[z_key] = plan
@@ -812,12 +738,33 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if climate_ent:
                         await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "auto"})
 
-        if any_recovery_triggered and recovery_bool_ent:
-            try:
-                await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": recovery_bool_ent})
+        # Comfort Recovery Latch Management
+        if recovery_bool_ent:
+            if any_recovery_triggered:
                 self.comfort_recovery_active = True
-            except Exception as e:
-                _LOGGER.error("Failed to turn on comfort recovery latch: %s", e)
+                if not is_recovery_on:
+                    _LOGGER.info("Passable Smart Climate: Comfort recovery triggered across zones. Engaging recovery latch.")
+                    try:
+                        await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": recovery_bool_ent})
+                    except Exception as e:
+                        _LOGGER.error("Failed to turn on comfort recovery latch: %s", e)
+                # Force all zone window eco modes off so HVAC runs full power
+                for z_c in zones_config.values():
+                    e_b = z_c.get(CONF_WINDOW_ECO_BOOLEAN)
+                    if e_b:
+                        try:
+                            await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": e_b})
+                        except Exception:
+                            pass
+            elif is_recovery_on:
+                _LOGGER.info("Passable Smart Climate: Comfort recovered across all zones. Disengaging recovery latch.")
+                try:
+                    await self.hass.services.async_call("input_boolean", "turn_off", {"entity_id": recovery_bool_ent})
+                except Exception as e:
+                    _LOGGER.error("Failed to turn off comfort recovery latch: %s", e)
+                self.comfort_recovery_active = False
+            else:
+                self.comfort_recovery_active = False
 
         self.zone_results = zone_plans
 
@@ -873,6 +820,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if seasonal_details:
             details += f"\n\n{seasonal_details}"
+
+        if self.comfort_recovery_active and is_vetoed:
+            details += "\n\n*(Comfort recovery active: HVAC running to restore indoor comfort)*"
 
         if dwell_held and self._last_open_recommendation_time is not None:
             rem_m = max(1, int(round((open_dwell_mins * 60 - (now_utc - self._last_open_recommendation_time).total_seconds()) / 60.0)))

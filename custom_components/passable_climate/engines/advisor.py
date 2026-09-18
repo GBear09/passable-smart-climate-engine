@@ -100,21 +100,21 @@ def evaluate_environmental_vetoes(
     """
     # 1. Precipitation Veto
     if weather_condition and weather_condition.lower() in BAD_WEATHER_CONDITIONS:
-        return True, f"Hazardous weather condition ({weather_condition}). Keep windows closed."
+        return True, f"Hazardous weather condition ({weather_condition})"
 
     if precipitation_probability is not None and precipitation_probability >= max_precip_prob:
-        return True, f"High precipitation probability ({round(precipitation_probability)}%). Keep windows closed."
+        return True, f"High precipitation probability ({round(precipitation_probability)}%)"
 
     # 2. Wind Hazard Veto
     if wind_speed is not None and wind_speed >= high_wind_speed:
-        return True, f"High sustained wind speed ({round(wind_speed, 1)} mph) causes severe interior drafts."
+        return True, f"High sustained wind speed ({round(wind_speed, 1)} mph)"
 
     if wind_gust is not None and wind_gust >= high_wind_gust:
-        return True, f"High wind gusts ({round(wind_gust, 1)} mph) risk window or property damage."
+        return True, f"High wind gusts ({round(wind_gust, 1)} mph)"
 
     # 3. Air Quality Veto
     if aqi_value is not None and aqi_value >= aqi_threshold:
-        return True, f"Unfavorable Air Quality Index (AQI {round(aqi_value)}). Keep windows closed."
+        return True, f"Unfavorable Air Quality Index (AQI {round(aqi_value)})"
 
     return False, ""
 
@@ -385,7 +385,7 @@ def determine_seasonal_mode(
     if heat_spike >= 7.0 and max_lookahead_temp >= max(88.0, active_cool_sp + 12.0):
         candidate_mode = "heatwave_prep"
         candidate_details = (
-            f"Seasonal Mode: Severe heatwave approaching ({round(max_lookahead_temp, 1)}°F peak, "
+            f"Seasonal Mode (Heatwave Prep): Severe heatwave approaching ({round(max_lookahead_temp, 1)}°F peak, "
             f"+{round(heat_spike, 1)}°F above 7-day average high). Engaging aggressive thermal pre-cooling."
         )
     else:
@@ -400,14 +400,14 @@ def determine_seasonal_mode(
         if hvac_mode == "cool" and avg_temp < min_comfort:
             candidate_mode = "fall_transition"
             candidate_details = (
-                f"Seasonal Mode: Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F "
-                f"(below comfort minimum). Prioritizing heat retention."
+                f"Seasonal Mode (Fall Transition): Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F "
+                f"(below comfort minimum). Prioritizing passive heat retention."
             )
         elif hvac_mode == "heat" and avg_temp > (min_comfort - 5.0):
             candidate_mode = "spring_transition"
             candidate_details = (
-                f"Seasonal Mode: Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F. "
-                f"Prioritizing cool air retention."
+                f"Seasonal Mode (Spring Transition): Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F. "
+                f"Prioritizing passive cool air retention."
             )
 
     # 48-Hour Imminent Threat Suspension Gate
@@ -418,7 +418,7 @@ def determine_seasonal_mode(
             mode_name = "Heatwave Prep" if candidate_mode == "heatwave_prep" else "Spring Transition"
             return (
                 "normal",
-                f"Seasonal Mode: 7-day forecast indicates {mode_name}, but suspended for today. "
+                f"Seasonal Mode ({mode_name}): 7-day forecast indicates {mode_name}, but suspended for today. "
                 f"Upcoming 48h high is only {round(upcoming_peak, 1)}°F (below cooling threshold {round(active_cool_sp, 1)}°F).",
             )
         return candidate_mode, candidate_details
@@ -429,7 +429,7 @@ def determine_seasonal_mode(
         if upcoming_low > active_heat_sp:
             return (
                 "normal",
-                f"Seasonal Mode: 7-day average indicates Fall Transition, but suspended for today. "
+                f"Seasonal Mode (Fall Transition): 7-day average indicates Fall Transition, but suspended for today. "
                 f"Upcoming 48h low is {round(upcoming_low, 1)}°F (above heating threshold {round(active_heat_sp, 1)}°F).",
             )
         return candidate_mode, candidate_details
