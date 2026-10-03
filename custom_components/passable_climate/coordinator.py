@@ -593,6 +593,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         max_dp = float(self.comfort_settings.get(CONF_COMFORT_DEW_POINT_MAX, self.options.get(CONF_MAX_DEW_POINT, DEFAULT_MAX_DEW_POINT)))
         open_margin = float(self.options.get(CONF_OPEN_TEMP_MARGIN, DEFAULT_OPEN_TEMP_MARGIN))
         close_margin = float(self.options.get(CONF_CLOSE_TEMP_MARGIN, DEFAULT_CLOSE_TEMP_MARGIN))
+        open_dwell = float(self.options.get(CONF_OPEN_DWELL_MINUTES, self.entry_data.get(CONF_OPEN_DWELL_MINUTES, DEFAULT_OPEN_DWELL_MINUTES)))
 
         any_recovery_triggered = False
 
@@ -653,6 +654,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 max_dew_point=max_dp,
                 open_temp_margin=open_margin,
                 close_temp_margin=close_margin,
+                open_dwell_minutes=open_dwell,
             )
 
             if plan.comfort_recovery_triggered:

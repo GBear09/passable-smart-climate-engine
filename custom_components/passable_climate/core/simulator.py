@@ -108,6 +108,13 @@ def run_hybrid_simulation(
             rate_open = max(-2.5, min(2.5, rate_open))
             rate_closed = max(-2.5, min(2.5, rate_closed))
 
+            # Thermodynamic monotonicity constraint:
+            # Convective ventilation cannot transfer heat opposite to the temperature gradient.
+            if delta_t < 0:
+                rate_open = min(rate_open, rate_closed)
+            elif delta_t > 0:
+                rate_open = max(rate_open, rate_closed)
+
             # Directional verification:
             should_open = is_favorable
             if is_favorable and (hvac_mode == "cool" or seasonal_mode in ["spring_transition", "heatwave_prep"]) and not macro_override:

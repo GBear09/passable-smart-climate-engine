@@ -397,13 +397,13 @@ def determine_seasonal_mode(
             elif comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
                 min_comfort = min(comfort_profile["lower_profile"]["temperature_data_points"])
 
-        if hvac_mode == "cool" and avg_temp < min_comfort:
+        if (hvac_mode in ["cool", "off"]) and avg_temp < min_comfort:
             candidate_mode = "fall_transition"
             candidate_details = (
                 f"Seasonal Mode (Fall Transition): Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F "
                 f"(below comfort minimum). Prioritizing passive heat retention."
             )
-        elif hvac_mode == "heat" and avg_temp > (min_comfort - 5.0):
+        elif (hvac_mode in ["heat", "off"]) and avg_temp > (min_comfort - 5.0):
             candidate_mode = "spring_transition"
             candidate_details = (
                 f"Seasonal Mode (Spring Transition): Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F. "
@@ -468,6 +468,7 @@ def evaluate_zone_plan(
     max_dew_point: float = 58.0,
     open_temp_margin: float = 1.0,
     close_temp_margin: float = 0.2,
+    open_dwell_minutes: float = 45.0,
 ) -> ZonePlanResult:
     """Runs simulation and evaluates the optimal action plan for a zone.
     Implements 100% parity with legacy smart_window_advisor.py, with minute-precise
@@ -1124,6 +1125,27 @@ def evaluate_zone_plan(
                     eco_mode_requested=False,
                     scenario="veto_negligible_gain",
                 )
+        else:
+            is_comfortable = (
+                safe_min_temp <= inside_temp <= safe_max_temp
+                and (lower_bound is None or upper_bound is None or (lower_bound <= inside_humidity <= upper_bound))
+            )
+            if is_comfortable and not is_currently_open:
+                idx = min(actions[0].hours - 1, len(history) - 1)
+                idx = max(0, idx)
+                closed_final_temp = closed_history[idx]["temp"] if closed_history and len(closed_history) > idx else inside_temp
+                final_temp = history[idx]["temp"]
+                thermal_diff = abs(closed_final_temp - final_temp)
+                if thermal_diff < 0.5:
+                    msg = f"Keep {zone_name} windows closed. Potential thermal benefit is negligible (< 0.5°F difference vs closed); let the building envelope maintain comfort."
+                    return ZonePlanResult(
+                        recommended_state="Close Windows",
+                        details_message=msg,
+                        history=closed_history,
+                        actions=[SimulationAction("closed", 1)],
+                        eco_mode_requested=False,
+                        scenario="veto_negligible_gain",
+                    )
 
     # Contextual Explanation Strings
     if seasonal_mode in ["spring_transition", "heatwave_prep"]:
@@ -1163,7 +1185,19 @@ def evaluate_zone_plan(
         else:
             close_reason = "due to unfavorable outside conditions"
     else:
-        open_reason = "to improve comfort"
+        is_comfortable = (
+            safe_min_temp <= inside_temp <= safe_max_temp
+            and (lower_bound is None or upper_bound is None or (lower_bound <= inside_humidity <= upper_bound))
+        )
+        if is_comfortable:
+            if temp_change <= -0.5:
+                open_reason = "for free cooling"
+            elif temp_change >= 0.5:
+                open_reason = "for free heating"
+            else:
+                open_reason = "for fresh air ventilation"
+        else:
+            open_reason = "to restore comfort"
         close_reason = "to maintain current temperature"
 
     eco_mode_on = (seasonal_mode != "normal" and seasonal_mode != "heatwave_prep")
@@ -1183,6 +1217,18 @@ def evaluate_zone_plan(
         if len(actions) > 1 and actions[0].hours < len(sim_forecast):
             change_dt = _parse_local_dt(sim_forecast[actions[0].hours].get("datetime"), ref_now)
             target_time_str = _format_time(change_dt)
+            remaining_mins = (change_dt - ref_now).total_seconds() / 60.0
+            if not is_currently_open and remaining_mins < open_dwell_minutes:
+                return ZonePlanResult(
+                    recommended_state="Close Windows",
+                    details_message=f"Keep {zone_name} windows closed. Favorable window is too brief ({round(remaining_mins)} mins remaining until {target_time_str}); outside conditions become unfavorable soon.",
+                    history=closed_history,
+                    actions=[SimulationAction("closed", 1)],
+                    eco_mode_requested=eco_mode_on,
+                    scenario="veto_insufficient_dwell",
+                    target_time=target_time_str,
+                )
+
             return ZonePlanResult(
                 recommended_state="Open Windows",
                 details_message=f"Open {zone_name} windows {open_reason}. Close around {target_time_str}.{temp_msg}",
