@@ -657,16 +657,45 @@ def evaluate_zone_plan(
                         hours_to_comfort=display_hours,
                     )
             else:
-                msg = "HVAC is needed." if hvac_mode == "cool" else "A change to 'cool' mode is needed."
-                return ZonePlanResult(
-                    recommended_state="Close Windows",
-                    details_message=f"Keep {zone_name} windows closed. {msg} Passive recovery would take too long.",
-                    history=recov_closed,
-                    actions=[SimulationAction("closed", 1)],
-                    eco_mode_requested=False,
-                    comfort_recovery_triggered=True,
-                    scenario="comfort_recovery",
+                can_cool_dehumidify = (
+                    seasonal_mode not in ["fall_transition", "coldsnap_prep"]
+                    and hvac_mode != "heat"
+                    and inside_temp >= 70.0
+                    and inside_temp > (active_heat_sp + 1.5)
+                    and inside_temp > (safe_min_temp + 2.0)
+                    and current_outside_temp >= 58.0
                 )
+                if can_cool_dehumidify:
+                    msg = "HVAC is needed." if hvac_mode == "cool" else "A change to 'cool' mode is needed."
+                    return ZonePlanResult(
+                        recommended_state="Close Windows",
+                        details_message=f"Keep {zone_name} windows closed. {msg} Passive recovery would take too long.",
+                        history=recov_closed,
+                        actions=[SimulationAction("closed", 1)],
+                        eco_mode_requested=False,
+                        comfort_recovery_triggered=True,
+                        scenario="comfort_recovery",
+                    )
+                else:
+                    if seasonal_mode in ["fall_transition", "coldsnap_prep"]:
+                        details_msg = f"Keep {zone_name} windows closed to retain heat. Dehumidification is needed; passive recovery would take too long."
+                        scenario_str = "fall_trap_heat"
+                    elif hvac_mode == "heat":
+                        details_msg = f"Keep {zone_name} windows closed. Dehumidification is needed. Passive recovery would take too long."
+                        scenario_str = "comfort_recovery"
+                    else:
+                        details_msg = f"Keep {zone_name} windows closed. Dehumidification is needed. Space is too cool for AC cooling; passive recovery would take too long."
+                        scenario_str = "comfort_recovery"
+
+                    return ZonePlanResult(
+                        recommended_state="Close Windows",
+                        details_message=details_msg,
+                        history=recov_closed,
+                        actions=[SimulationAction("closed", 1)],
+                        eco_mode_requested=False,
+                        comfort_recovery_triggered=False,
+                        scenario=scenario_str,
+                    )
 
         elif not is_bedtime and lower_bound is not None and inside_humidity < lower_bound:
             if recovery_hour is not None and recovery_hour <= hours_until_morning:
@@ -738,14 +767,22 @@ def evaluate_zone_plan(
                         hours_to_comfort=display_hours,
                     )
             else:
-                msg = "HVAC is needed." if hvac_mode == "heat" else "A change to 'heat' mode is needed."
+                is_cold = (inside_temp <= active_heat_sp or inside_temp <= safe_min_temp)
+                if is_cold:
+                    msg = "HVAC heating is needed for temperature." if hvac_mode == "heat" else "A change to 'heat' mode is needed for temperature."
+                    details_msg = f"Keep {zone_name} windows closed. {msg} Humidification is also needed; passive recovery would take too long."
+                    comfort_recovery_flag = True
+                else:
+                    details_msg = f"Keep {zone_name} windows closed. Humidification is needed. Passive recovery would take too long."
+                    comfort_recovery_flag = False
+
                 return ZonePlanResult(
                     recommended_state="Close Windows",
-                    details_message=f"Keep {zone_name} windows closed. {msg} Passive recovery would take too long.",
+                    details_message=details_msg,
                     history=recov_closed,
                     actions=[SimulationAction("closed", 1)],
                     eco_mode_requested=False,
-                    comfort_recovery_triggered=True,
+                    comfort_recovery_triggered=comfort_recovery_flag,
                     scenario="comfort_recovery",
                 )
 
