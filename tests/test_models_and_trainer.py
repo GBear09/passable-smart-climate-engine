@@ -100,6 +100,42 @@ class TestModelsAndTrainer(unittest.TestCase):
         # First coefficient should be close to 0.3
         self.assertAlmostEqual(coeffs[0], 0.3, delta=0.1)
 
+    def test_trainer_noise_clamping_acceptance(self):
+        """Trainer must clamp tiny negative regression noise and accept valid physical models."""
+        from unittest import mock
+        from custom_components.passable_climate.training.trainer import train_all_models_sync
+
+        client = mock.MagicMock()
+        # Mock 2D RANSAC return
+        client.fetch_and_bin_profile_data.return_value = (
+            list(range(-10, 10)),
+            [0.05 * x + 0.5 for x in range(-10, 10)],
+            20,
+        )
+
+        # Mock MLR return with tiny negative noise on solar west (-0.00002) and wind draft (-0.0005)
+        # 300 data points with 6 features: [Y, dt, wd, clouds, se, ss, sw]
+        import numpy as np
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 10, size=(320, 6))
+        # Ensure positive delta T
+        X[:, 0] = rng.uniform(5, 25, size=320)
+        # Physical rate: 0.03*dt + 0.002*wd + tiny noise
+        Y = 0.03 * X[:, 0] + 0.002 * X[:, 1] + 0.1
+        mlr_data = [tuple([float(y)] + list(x)) for y, x in zip(Y, X)]
+        client.fetch_mlr_data.return_value = (mlr_data, True)
+
+        models = train_all_models_sync(client, lookback_days=30)
+        self.assertIn("upstairs_temp_profile_win_closed", models)
+        m = models["upstairs_temp_profile_win_closed"]
+        self.assertEqual(m.model_type, "mlr")
+        self.assertIsNotNone(m.c_delta_t)
+        self.assertGreater(m.c_delta_t, 0.0)
+        # Solar coefficients must be >= 0.0 (non-negative)
+        self.assertGreaterEqual(m.c_solar_east, 0.0)
+        self.assertGreaterEqual(m.c_solar_south, 0.0)
+        self.assertGreaterEqual(m.c_solar_west, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

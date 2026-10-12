@@ -140,7 +140,7 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE, "None", ""}
-STALE_INDOOR = datetime.timedelta(minutes=45)
+STALE_INDOOR = datetime.timedelta(hours=24)
 RECOVERY_MIN_ON = datetime.timedelta(minutes=30)
 RECOVERY_EXIT_MARGIN_RH = 3.0
 
@@ -228,6 +228,13 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             import dataclasses
 
             cached_models = await self._models_store.async_load()
+            if not cached_models:
+                legacy_models_store = Store(self.hass, STORAGE_VERSION, f"{DOMAIN}.models")
+                cached_models = await legacy_models_store.async_load()
+                if cached_models:
+                    _LOGGER.info("Passable Smart Climate: Migrating models from legacy storage key.")
+                    self._models_store.async_delay_save(lambda: cached_models, 1)
+
             if cached_models and isinstance(cached_models, dict):
                 valid_fields = {f.name for f in dataclasses.fields(RateModel)}
                 for k, d in cached_models.items():
@@ -239,6 +246,13 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         try:
             cached_learning = await self._learning_store.async_load()
+            if not cached_learning:
+                legacy_learning_store = Store(self.hass, STORAGE_VERSION, f"{DOMAIN}.learning_data")
+                cached_learning = await legacy_learning_store.async_load()
+                if cached_learning:
+                    _LOGGER.info("Passable Smart Climate: Migrating circulation learning records from legacy storage key.")
+                    self._learning_store.async_delay_save(lambda: cached_learning, 1)
+
             if cached_learning and isinstance(cached_learning, dict):
                 self.circulation_manager.load_learning_data(cached_learning)
                 _LOGGER.info("Passable Smart Climate: Loaded circulation learning records from storage.")
@@ -304,7 +318,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not entity_id:
             return None
         st = self.hass.states.get(entity_id)
-        if st is None or st.state in _INVALID_STATES:
+        if st is None or st.state in _INVALID_STATES or (isinstance(st.state, str) and st.state.lower() in _INVALID_STATES):
             return None
         try:
             val = float(st.state)
@@ -866,19 +880,19 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             act_heat, act_cool = zone_setpoints.get(z_key, (68.0, 74.0))
 
             t_sensor_unit = self._get_attr(temp_ent, "unit_of_measurement", "°F")
-            in_temp_raw = self._read_float(temp_ent, lo=30.0, hi=110.0, max_age=STALE_INDOOR)
+            in_temp_raw = self._read_float(temp_ent, lo=30.0, hi=110.0)
             in_temp = self._to_f(in_temp_raw, t_sensor_unit) if in_temp_raw is not None else None
-            in_hum = self._read_float(hum_ent, lo=1.0, hi=100.0, max_age=STALE_INDOOR)
+            in_hum = self._read_float(hum_ent, lo=1.0, hi=100.0)
             win_raw = self._read_float(win_ent, lo=0.0, hi=1000.0)
 
             # Fail-safe: unknown contact state is treated as OPEN for every interlock
             is_open = True if win_raw is None else (win_raw > 0)
 
             if in_temp is None or in_hum is None:
-                _LOGGER.warning("Telemetry unavailable or stale for zone %s; defaulting to safe Close Windows", z_name)
+                _LOGGER.warning("Telemetry unavailable for zone %s; defaulting to safe Close Windows", z_name)
                 zone_plans[z_key] = ZonePlanResult(
                     recommended_state=CLOSE,
-                    details_message=f"Keep {z_name} windows closed (indoor telemetry unavailable or stale).",
+                    details_message=f"Keep {z_name} windows closed (indoor telemetry unavailable).",
                     history=[],
                     actions=[SimulationAction("closed", 1)],
                     eco_mode_requested=False,

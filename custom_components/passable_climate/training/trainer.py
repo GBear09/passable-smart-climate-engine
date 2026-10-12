@@ -112,9 +112,39 @@ def train_all_models_sync(
             coeffs, mlr_intercept, std_coeffs = multiple_linear_regression(mlr_data)
             if coeffs and mlr_intercept is not None and len(coeffs) == 6:
                 c_dt, c_wd, c_c, c_se, c_ss, c_sw = coeffs
+                is_open_model = key.endswith("_win_open")
+
+                # Clamp empirical regression noise on non-negative physical coefficients:
+                # 1. Direct solar irradiance cannot cause cooling (or moisture absorption).
+                # Unconstrained Ridge regression may yield tiny negative epsilons (-1e-4) due to collinearity.
+                # Clamp small negative solar coefficients (-0.01 < c < 0) to 0.0:
+                if c_se > -0.01:
+                    c_se = max(0.0, c_se)
+                if c_ss > -0.01:
+                    c_ss = max(0.0, c_ss)
+                if c_sw > -0.01:
+                    c_sw = max(0.0, c_sw)
+
+                # 2. Wind draft through open windows accelerates exchange (c_wd >= 0).
+                # Clamp small negative noise on open-window wind draft (-0.01 < c < 0) to 0.0:
+                if is_open_model and c_wd > -0.01:
+                    c_wd = max(0.0, c_wd)
+
+                # Synchronize standardized coefficients with physical clamping:
+                if std_coeffs and len(std_coeffs) == 6:
+                    nc_dt, nc_wd, nc_c, nc_se, nc_ss, nc_sw = std_coeffs
+                    if c_se == 0.0 and nc_se < 0.0:
+                        nc_se = 0.0
+                    if c_ss == 0.0 and nc_ss < 0.0:
+                        nc_ss = 0.0
+                    if c_sw == 0.0 and nc_sw < 0.0:
+                        nc_sw = 0.0
+                    if is_open_model and c_wd == 0.0 and nc_wd < 0.0:
+                        nc_wd = 0.0
+                    std_coeffs = [nc_dt, nc_wd, nc_c, nc_se, nc_ss, nc_sw]
+
                 # Sanity check validation bounds:
                 max_irr = 1000.0 if uses_true_solcast else 90.0
-                is_open_model = key.endswith("_win_open")
                 is_physical = (
                     c_dt > 0.0  # Heat/moisture transfer flows along gradient
                     and (c_wd >= 0.0 or not is_open_model)  # Wind draft accelerates exchange for open windows

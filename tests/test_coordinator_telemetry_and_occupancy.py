@@ -49,8 +49,8 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
         # Missing state returns None
         self.assertIsNone(self.coordinator._read_float("sensor.test", lo=0.0, hi=100.0))
 
-        # Unavailable / unknown returns None
-        for invalid in ["unknown", "unavailable", "None", ""]:
+        # Unavailable / unknown returns None (case-insensitive)
+        for invalid in ["unknown", "UNKNOWN", "unavailable", "Unavailable", "None", ""]:
             st = mock.MagicMock()
             st.state = invalid
             self.coordinator.hass.states.get.return_value = st
@@ -62,12 +62,20 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
         self.coordinator.hass.states.get.return_value = st
         self.assertIsNone(self.coordinator._read_float("sensor.test", lo=0.0, hi=100.0))
 
-        # Valid value returns float
+        # Valid available value returns float even if reported hours ago (quiet sensor)
+        old_time = now - datetime.timedelta(hours=5)
         st.state = "72.4"
-        st.last_reported = now
+        st.last_reported = old_time
+        st.last_updated = old_time
         self.coordinator.hass.states.get.return_value = st
         val = self.coordinator._read_float("sensor.test", lo=0.0, hi=100.0)
         self.assertEqual(val, 72.4)
+
+        # When max_age is explicitly enforced, old time returns None
+        val_stale = self.coordinator._read_float(
+            "sensor.test", lo=0.0, hi=100.0, max_age=datetime.timedelta(hours=1)
+        )
+        self.assertIsNone(val_stale)
 
     def test_occupancy_veto_in_advisor(self):
         """evaluate_environmental_vetoes must reject window actions when house is unoccupied."""
