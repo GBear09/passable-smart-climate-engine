@@ -14,6 +14,7 @@ def ransac_linear_fit(
     n_iterations: int = 150,
     threshold: float = 0.5,
     min_inliers: int = 10,
+    seed: int = 42,
 ) -> tuple[tuple[float, float] | None, list[bool] | None]:
     """Robust 2D linear regression using Random Sample Consensus (RANSAC).
     Returns: ((slope, intercept), inlier_mask) or (None, None)
@@ -24,12 +25,13 @@ def ransac_linear_fit(
         if n_samples < min_inliers or n_samples < 2:
             return None, None
 
+        rng = np.random.default_rng(seed)
         best_inlier_count = 0
         best_model: tuple[float, float] | None = None
         best_inliers_mask: np.ndarray | None = None
 
         for _ in range(n_iterations):
-            idx = np.random.choice(n_samples, 2, replace=False)
+            idx = rng.choice(n_samples, 2, replace=False)
             p1, p2 = data[idx[0]], data[idx[1]]
             if abs(p2[0] - p1[0]) < 1e-9:
                 continue
@@ -64,7 +66,7 @@ def multiple_linear_regression(
     data_list: list[tuple[float, ...]],
     alphas: list[float] | None = None,
 ) -> tuple[list[float] | None, float | None, list[float] | None]:
-    """Multiple Linear Regression with Ridge regularization and cross-validation.
+    """Multiple Linear Regression with Ridge regularization and blocked cross-validation.
     Target Y is column 0, features X are columns 1..N.
     Returns: (coefficients, intercept, standardized_coefficients)
     """
@@ -82,42 +84,48 @@ def multiple_linear_regression(
 
         best_alpha = alphas[0]
 
-        # 80/20 Cross-validation for alpha tuning
+        # Blocked K-fold over time-ordered samples to prevent autocorrelation leakage
         if len(alphas) > 1 and data.shape[0] > 100:
-            rng = np.random.RandomState(42)
-            indices = np.arange(data.shape[0])
-            rng.shuffle(indices)
-            split_idx = int(data.shape[0] * 0.8)
+            k_folds = min(8, max(3, data.shape[0] // 50))
+            blocks = np.array_split(np.arange(data.shape[0]), k_folds)
+            alpha_mse: dict[float, float] = {a: 0.0 for a in alphas}
 
-            train_idx, test_idx = indices[:split_idx], indices[split_idx:]
-            X_train, Y_train = X[train_idx], Y[train_idx]
-            X_test, Y_test = X[test_idx], Y[test_idx]
+            for k, test_idx in enumerate(blocks):
+                # 1-block gap buffer to eliminate autocorrelation leakage across boundaries
+                train_blocks = [b for j, b in enumerate(blocks) if abs(j - k) > 1]
+                if not train_blocks:
+                    train_blocks = [b for j, b in enumerate(blocks) if j != k]
+                train_idx = np.concatenate(train_blocks)
 
-            X_mean_train = np.mean(X_train, axis=0)
-            X_std_train = np.std(X_train, axis=0, ddof=1)
-            X_std_train[X_std_train == 0] = 1e-9
+                X_train, Y_train = X[train_idx], Y[train_idx]
+                X_test, Y_test = X[test_idx], Y[test_idx]
 
-            X_scaled_train = (X_train - X_mean_train) / X_std_train
-            A_scaled_train = np.c_[X_scaled_train, np.ones(X_scaled_train.shape[0])]
+                X_mean_train = np.mean(X_train, axis=0)
+                X_std_train = np.std(X_train, axis=0, ddof=1)
+                X_std_train[X_std_train == 0] = 1e-9
 
-            I = np.eye(A_scaled_train.shape[1])
-            I[-1, -1] = 0.0
+                X_scaled_train = (X_train - X_mean_train) / X_std_train
+                A_scaled_train = np.c_[X_scaled_train, np.ones(X_scaled_train.shape[0])]
 
-            best_mse = float("inf")
-            X_scaled_test = (X_test - X_mean_train) / X_std_train
-            A_scaled_test = np.c_[X_scaled_test, np.ones(X_scaled_test.shape[0])]
+                I = np.eye(A_scaled_train.shape[1])
+                I[-1, -1] = 0.0
 
-            for a in alphas:
-                c_scaled = np.linalg.solve(
-                    A_scaled_train.T @ A_scaled_train + a * I,
-                    A_scaled_train.T @ Y_train,
-                )
-                Y_pred = A_scaled_test @ c_scaled
-                mse = float(np.mean((Y_test - Y_pred) ** 2))
+                X_scaled_test = (X_test - X_mean_train) / X_std_train
+                A_scaled_test = np.c_[X_scaled_test, np.ones(X_scaled_test.shape[0])]
 
-                if mse < best_mse:
-                    best_mse = mse
-                    best_alpha = a
+                AtA = A_scaled_train.T @ A_scaled_train
+                AtY = A_scaled_train.T @ Y_train
+
+                for a in alphas:
+                    try:
+                        c_scaled = np.linalg.solve(AtA + a * I, AtY)
+                        Y_pred = A_scaled_test @ c_scaled
+                        mse = float(np.mean((Y_test - Y_pred) ** 2))
+                        alpha_mse[a] += mse
+                    except np.linalg.LinAlgError:
+                        alpha_mse[a] += 1e9
+
+            best_alpha = min(alpha_mse, key=alpha_mse.get)
 
         # Final regression on full dataset with optimal alpha
         X_mean = np.mean(X, axis=0)

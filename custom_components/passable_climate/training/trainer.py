@@ -8,6 +8,8 @@ import datetime
 import logging
 from typing import Any
 
+import numpy as np
+
 from ..core.models import RateModel
 from .influx_client import InfluxClient
 from .regression import multiple_linear_regression, ransac_linear_fit
@@ -108,19 +110,31 @@ def train_all_models_sync(
 
         if mlr_data and len(mlr_data) >= 300:
             coeffs, mlr_intercept, std_coeffs = multiple_linear_regression(mlr_data)
-            if coeffs and mlr_intercept is not None:
-                c_dt, c_wd, c_c, c_se, c_ss = coeffs
+            if coeffs and mlr_intercept is not None and len(coeffs) == 6:
+                c_dt, c_wd, c_c, c_se, c_ss, c_sw = coeffs
                 # Sanity check validation bounds:
                 max_irr = 1000.0 if uses_true_solcast else 90.0
-                is_sane = (
+                is_open_model = key.endswith("_win_open")
+                is_physical = (
+                    c_dt > 0.0  # Heat/moisture transfer flows along gradient
+                    and (c_wd >= 0.0 or not is_open_model)  # Wind draft accelerates exchange for open windows
+                    and (is_hum or min(c_se, c_ss, c_sw) >= 0.0)  # Direct solar gain never causes cooling
+                )
+                is_sane = is_physical and (
                     abs(c_dt * 50.0) < 15.0
                     and abs(c_wd * 2000.0) < 15.0
                     and abs(c_c * 100.0) < 10.0
                     and abs(c_se * max_irr) < 15.0
                     and abs(c_ss * max_irr) < 15.0
+                    and abs(c_sw * max_irr) < 15.0
                 )
 
                 if is_sane:
+                    arr = np.asarray(mlr_data, dtype=float)
+                    model.feature_lo = np.percentile(arr[:, 1:], 1, axis=0).round(4).tolist()
+                    model.feature_hi = np.percentile(arr[:, 1:], 99, axis=0).round(4).tolist()
+                    model.rate_lo, model.rate_hi = (float(v) for v in np.percentile(arr[:, 0], [0.5, 99.5]))
+
                     model.model_type = "mlr"
                     model.c_delta_t = round(c_dt, 4)
                     model.c_wind_draft = round(c_wd, 4)
@@ -128,18 +142,26 @@ def train_all_models_sync(
                     model.c_irradiance = 0.0
                     model.c_solar_east = round(c_se, 4)
                     model.c_solar_south = round(c_ss, 4)
+                    model.c_solar_west = round(c_sw, 4)
                     model.mlr_intercept = round(mlr_intercept, 4)
                     model.mlr_data_points = len(mlr_data)
                     model.uses_true_solcast = uses_true_solcast
 
-                    if std_coeffs:
-                        nc_dt, nc_wd, nc_c, nc_se, nc_ss = std_coeffs
+                    if std_coeffs and len(std_coeffs) == 6:
+                        nc_dt, nc_wd, nc_c, nc_se, nc_ss, nc_sw = std_coeffs
                         model.norm_c_delta_t = round(nc_dt, 4)
                         model.norm_c_wind_draft = round(nc_wd, 4)
                         model.norm_c_clouds = round(nc_c, 4)
                         model.norm_c_irradiance = 0.0
                         model.norm_c_solar_east = round(nc_se, 4)
                         model.norm_c_solar_south = round(nc_ss, 4)
+                        model.norm_c_solar_west = round(nc_sw, 4)
+                else:
+                    _LOGGER.warning(
+                        "Rejected non-physical or out-of-bounds MLR model for %s: %s",
+                        key,
+                        [round(c, 5) for c in coeffs],
+                    )
 
         results[key] = model
 

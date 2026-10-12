@@ -8,7 +8,7 @@ import datetime
 import json
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
@@ -16,7 +16,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_WEATHER_ENTITY,
     CONF_ZONES,
+    DEFAULT_WEATHER_ENTITY,
     DOMAIN,
     METRIC_HUMIDITY_CLOSED,
     METRIC_HUMIDITY_COOL,
@@ -88,6 +90,8 @@ async def async_setup_entry(
 class PassablePlotDataSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
     """Represents one of the 16 regression scatter plot data entities."""
 
+    _unrecorded_attributes = frozenset({"x_data", "y_data", "fit_x", "fit_y"})
+
     def __init__(
         self,
         coordinator: SmartClimateCoordinator,
@@ -152,6 +156,7 @@ class PassablePlotDataSensor(CoordinatorEntity[SmartClimateCoordinator], SensorE
                 "c_irradiance": None,
                 "c_solar_east": None,
                 "c_solar_south": None,
+                "c_solar_west": None,
                 "mlr_intercept": None,
                 "mlr_data_points": 0,
                 "norm_c_delta_t": None,
@@ -160,6 +165,7 @@ class PassablePlotDataSensor(CoordinatorEntity[SmartClimateCoordinator], SensorE
                 "norm_c_irradiance": None,
                 "norm_c_solar_east": None,
                 "norm_c_solar_south": None,
+                "norm_c_solar_west": None,
                 "last_updated": None,
             }
 
@@ -178,6 +184,7 @@ class PassablePlotDataSensor(CoordinatorEntity[SmartClimateCoordinator], SensorE
             "c_irradiance": model.c_irradiance,
             "c_solar_east": model.c_solar_east,
             "c_solar_south": model.c_solar_south,
+            "c_solar_west": model.c_solar_west,
             "mlr_intercept": model.mlr_intercept,
             "mlr_data_points": model.mlr_data_points,
             "norm_c_delta_t": model.norm_c_delta_t,
@@ -186,11 +193,15 @@ class PassablePlotDataSensor(CoordinatorEntity[SmartClimateCoordinator], SensorE
             "norm_c_irradiance": model.norm_c_irradiance,
             "norm_c_solar_east": model.norm_c_solar_east,
             "norm_c_solar_south": model.norm_c_solar_south,
+            "norm_c_solar_west": model.norm_c_solar_west,
             "last_updated": model.last_updated,
         }
 
 class PassableSimulationDataSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
     """Publishes the 10-minute microstep forward trajectory for Lovelace Card 0."""
+
+    _unrecorded_attributes = frozenset({"data"})
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator: SmartClimateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
@@ -207,8 +218,8 @@ class PassableSimulationDataSensor(CoordinatorEntity[SmartClimateCoordinator], S
         )
 
     @property
-    def native_value(self) -> str:
-        return datetime.datetime.now().isoformat()
+    def native_value(self) -> datetime.datetime | None:
+        return self.coordinator.last_update_time
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -279,10 +290,21 @@ class PassableOutdoorEnthalpySensor(CoordinatorEntity[SmartClimateCoordinator], 
 
     @property
     def native_value(self) -> float | None:
-        w_temp = self.coordinator._get_attr("weather.home", "temperature")
-        w_rh = self.coordinator._get_attr("weather.home", "humidity")
+        weather_ent = self.coordinator.options.get(
+            CONF_WEATHER_ENTITY,
+            self.coordinator.entry_data.get(CONF_WEATHER_ENTITY, DEFAULT_WEATHER_ENTITY),
+        )
+        w_temp = self.coordinator._get_attr(weather_ent, "temperature")
+        w_rh = self.coordinator._get_attr(weather_ent, "humidity")
         if w_temp is not None and w_rh is not None:
-            return round(PsychrometricEngine.specific_enthalpy(float(w_temp), float(w_rh)), 2)
+            t_unit, _ = self.coordinator._weather_units(weather_ent)
+            temp_f = self.coordinator._to_f(float(w_temp), t_unit)
+            return round(
+                PsychrometricEngine.specific_enthalpy(
+                    temp_f, float(w_rh), pressure_hpa=self.coordinator.pressure_hpa
+                ),
+                2,
+            )
         return None
 
 class PassableZoneEnthalpyDeltaSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
@@ -316,14 +338,26 @@ class PassableZoneEnthalpyDeltaSensor(CoordinatorEntity[SmartClimateCoordinator]
         z_conf = zones.get(self.zone_id, {})
         t_ent = z_conf.get("temperature_sensor")
         h_ent = z_conf.get("humidity_sensor")
+        weather_ent = self.coordinator.options.get(
+            CONF_WEATHER_ENTITY,
+            self.coordinator.entry_data.get(CONF_WEATHER_ENTITY, DEFAULT_WEATHER_ENTITY),
+        )
 
-        in_temp = self.coordinator._get_val(t_ent)
+        in_temp_raw = self.coordinator._get_val(t_ent)
         in_rh = self.coordinator._get_val(h_ent)
-        out_temp = self.coordinator._get_attr("weather.home", "temperature")
-        out_rh = self.coordinator._get_attr("weather.home", "humidity")
+        out_temp_raw = self.coordinator._get_attr(weather_ent, "temperature")
+        out_rh = self.coordinator._get_attr(weather_ent, "humidity")
 
-        if in_temp is not None and in_rh is not None and out_temp is not None and out_rh is not None:
-            h_in = PsychrometricEngine.specific_enthalpy(float(in_temp), float(in_rh))
-            h_out = PsychrometricEngine.specific_enthalpy(float(out_temp), float(out_rh))
+        if in_temp_raw is not None and in_rh is not None and out_temp_raw is not None and out_rh is not None:
+            t_unit, _ = self.coordinator._weather_units(weather_ent)
+            out_temp = self.coordinator._to_f(float(out_temp_raw), t_unit)
+            in_unit = self.coordinator._get_attr(t_ent, "unit_of_measurement", "°F")
+            in_temp = self.coordinator._to_f(float(in_temp_raw), in_unit)
+            h_in = PsychrometricEngine.specific_enthalpy(
+                in_temp, float(in_rh), pressure_hpa=self.coordinator.pressure_hpa
+            )
+            h_out = PsychrometricEngine.specific_enthalpy(
+                out_temp, float(out_rh), pressure_hpa=self.coordinator.pressure_hpa
+            )
             return round(h_in - h_out, 2)
         return None

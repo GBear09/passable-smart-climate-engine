@@ -6,21 +6,11 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(TESTS_DIR))
+sys.path.insert(0, TESTS_DIR)
 
-# Mock Home Assistant modules so advisor can be imported directly
-class MockModule(mock.MagicMock):
-    __path__ = []
-
-sys.modules["homeassistant"] = MockModule()
-sys.modules["homeassistant.config_entries"] = mock.MagicMock()
-sys.modules["homeassistant.const"] = mock.MagicMock()
-sys.modules["homeassistant.core"] = mock.MagicMock()
-sys.modules["homeassistant.helpers"] = MockModule()
-sys.modules["homeassistant.helpers.update_coordinator"] = mock.MagicMock()
-sys.modules["homeassistant.helpers.storage"] = mock.MagicMock()
-sys.modules["homeassistant.util"] = MockModule()
-sys.modules["homeassistant.util.dt"] = mock.MagicMock()
+import ha_mock  # noqa: F401
 
 from custom_components.passable_climate.core.models import RateModel
 from custom_components.passable_climate.engines.advisor import evaluate_zone_plan

@@ -27,14 +27,20 @@ class CirculationManager:
             "downstairs": [],
         }
 
+    def get_zone_memory(self, z_key: str) -> dict[str, Any]:
+        """Returns or initializes state memory for a zone key."""
+        return self.state_memory.setdefault(
+            z_key,
+            {"start_time": None, "start_temp": None, "mode": None, "lockout_until": None},
+        )
+
     def load_learning_data(self, data: dict[str, Any]) -> None:
         """Loads historical learning data and state memory from storage dictionary."""
         if not data:
             return
         saved_memory = data.get("state_memory", {})
-        for z_key in ["upstairs", "downstairs"]:
-            if z_key in saved_memory:
-                mem = saved_memory[z_key]
+        for z_key, mem in saved_memory.items():
+            if isinstance(mem, dict):
                 st = mem.get("start_time")
                 lo = mem.get("lockout_until")
                 self.state_memory[z_key] = {
@@ -44,11 +50,13 @@ class CirculationManager:
                     "lockout_until": datetime.datetime.fromisoformat(lo) if lo else None,
                 }
         saved_outcomes = data.get("circulation_outcomes", {})
-        for z_key in ["upstairs", "downstairs"]:
-            if z_key in saved_outcomes:
+        for z_key, outcomes in saved_outcomes.items():
+            if isinstance(outcomes, list):
                 # Sanitize legacy outcomes: discard bogus success records where temp rose during cooling
                 valid_recs = []
-                for r in saved_outcomes[z_key]:
+                for r in outcomes:
+                    if not isinstance(r, dict):
+                        continue
                     p = r.get("perf_vs_expected", 0.0)
                     if r.get("needs_cooling") and r.get("success") and p > 0.1:
                         continue
@@ -189,7 +197,7 @@ class CirculationManager:
             needs_heating = False
 
         if is_active:
-            mem = self.state_memory[z_key]
+            mem = self.get_zone_memory(z_key)
             start_time = mem.get("start_time") or now_utc
             start_temp = mem.get("start_temp") or area_temp
             active_mode = mem.get("mode") or ("cool" if needs_cooling else "heat")

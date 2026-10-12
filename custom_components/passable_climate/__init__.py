@@ -6,13 +6,21 @@ and dual-zone thermal model trainer for Home Assistant.
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.start import async_at_started
 
-from .const import DOMAIN, PLATFORMS
+from .const import (
+    CONF_INFLUX_RETRAIN_HOURS,
+    DEFAULT_INFLUX_RETRAIN_HOURS,
+    DOMAIN,
+    PLATFORMS,
+)
 from .coordinator import SmartClimateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,13 +33,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Passable Smart Climate Engine from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    coordinator = SmartClimateCoordinator(
-        hass=hass,
-        entry_data=entry.data,
-        entry_options=entry.options,
-    )
+    coordinator = SmartClimateCoordinator(hass=hass, entry=entry)
 
-    # Initialize coordinator: load cached models and circulation memory
+    # Initialize coordinator: load cached models, circulation memory, and latch
     await coordinator.async_initialize()
 
     # Setup reactive listeners for window contacts and profile updates
@@ -40,16 +44,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Perform first refresh
     await coordinator.async_config_entry_first_refresh()
 
-    # Store coordinator instance
+    # Store coordinator instance in runtime_data and domain registry
+    entry.runtime_data = coordinator
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    entry.async_on_unload(coordinator.async_unload)
 
     # If no models are cached yet, trigger background retraining
     if not coordinator.models:
         _LOGGER.info("Passable Smart Climate: No cached models found; triggering initial background regression training.")
-        hass.async_create_task(coordinator.async_retrain_models())
+        entry.async_create_background_task(
+            hass, coordinator.async_retrain_models(), "passable_climate_initial_train"
+        )
 
-    # Register platforms (sensor, binary_sensor, button)
+    # Scheduled retraining interval
+    retrain_h = float(
+        entry.options.get(
+            CONF_INFLUX_RETRAIN_HOURS,
+            entry.data.get(CONF_INFLUX_RETRAIN_HOURS, DEFAULT_INFLUX_RETRAIN_HOURS),
+        )
+    )
+    if retrain_h > 0:
+        async def _scheduled_retrain(_now: Any) -> None:
+            await coordinator.async_retrain_models()
+
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass, _scheduled_retrain, datetime.timedelta(hours=retrain_h)
+            )
+        )
+
+    # Register platforms (sensor, binary_sensor, button, number)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Enable actuation only once Home Assistant has fully started and restored all entities
+    async def _enable_actuation(_hass: HomeAssistant) -> None:
+        coordinator.actuation_enabled = True
+        await coordinator.async_request_refresh()
+
+    entry.async_on_unload(async_at_started(hass, _enable_actuation))
 
     # Register update listener for options flow changes
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))

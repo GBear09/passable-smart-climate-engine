@@ -116,6 +116,11 @@ def evaluate_environmental_vetoes(
     if aqi_value is not None and aqi_value >= aqi_threshold:
         return True, f"Unfavorable Air Quality Index (AQI {round(aqi_value)})"
 
+    # 4. Occupancy / Security Veto
+    if someone_is_home is False or (home_mode or "").lower() in {"away", "vacation"}:
+        mode_str = f"home mode: {home_mode}" if home_mode else "unoccupied"
+        return True, f"Nobody home to operate windows ({mode_str})"
+
     return False, ""
 
 
@@ -243,6 +248,13 @@ def is_outside_air_favorable(
     elif hvac_mode == "off":
         if outside_temp < safe_min_temp or outside_temp > safe_max_temp:
             return False, f"Outdoor temperature ({outside_temp:.1f}°F) is outside comfortable band."
+        if inside_upper_bound is not None and proj_rh > inside_upper_bound - humidity_buffer:
+            return False, f"Outdoor moisture too high ({proj_rh:.1f}% projected)."
+        mid = (safe_min_temp + safe_max_temp) / 2.0
+        if (inside_temp >= mid and outside_temp >= inside_temp - temp_margin) or (
+            inside_temp < mid and outside_temp <= inside_temp + temp_margin
+        ):
+            return False, "Ventilation would move indoor temperature away from comfort center."
         return True, "Comfortable ambient conditions."
 
     return False, "Unfavorable conditions."

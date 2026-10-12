@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 import datetime
 from typing import Any, Literal
 
+from .solar import facade_solar_features
+
 @dataclass
 class RateModel:
     """Represents a trained thermal or moisture rate model (RANSAC or MLR)."""
@@ -27,6 +29,7 @@ class RateModel:
     c_irradiance: float | None = None
     c_solar_east: float | None = None
     c_solar_south: float | None = None
+    c_solar_west: float | None = None
     mlr_intercept: float | None = None
     mlr_data_points: int = 0
     uses_true_solcast: bool = True
@@ -38,6 +41,13 @@ class RateModel:
     norm_c_irradiance: float | None = None
     norm_c_solar_east: float | None = None
     norm_c_solar_south: float | None = None
+    norm_c_solar_west: float | None = None
+
+    # Training-domain envelope (1st/99th percentiles) for OOD containment
+    feature_lo: list[float] = field(default_factory=list)
+    feature_hi: list[float] = field(default_factory=list)
+    rate_lo: float | None = None
+    rate_hi: float | None = None
 
     last_updated: str = ""
 
@@ -61,18 +71,26 @@ class RateModel:
                 if self.uses_true_solcast
                 else (elevation * ((100.0 - cloud_coverage) / 100.0) if elevation > 0 else 0.0)
             )
-            solar_east = irradiance * az_sin if irradiance > 0 else 0.0
-            solar_south = irradiance * az_cos if irradiance > 0 else 0.0
+            s_east, s_south, s_west = facade_solar_features(irradiance, az_sin, az_cos)
 
-            rate = (
-                (self.c_delta_t * delta)
-                + ((self.c_wind_draft or 0.0) * wind_draft)
-                + ((self.c_clouds or 0.0) * cloud_coverage)
-                + ((self.c_irradiance or 0.0) * irradiance)
-                + ((self.c_solar_east or 0.0) * solar_east)
-                + ((self.c_solar_south or 0.0) * solar_south)
-                + self.mlr_intercept
-            )
+            x = [delta, wind_draft, cloud_coverage, s_east, s_south, s_west]
+            if len(self.feature_lo) == len(x) and len(self.feature_hi) == len(x):
+                x = [min(max(v, lo), hi) for v, lo, hi in zip(x, self.feature_lo, self.feature_hi)]
+
+            c = [
+                self.c_delta_t,
+                self.c_wind_draft or 0.0,
+                self.c_clouds or 0.0,
+                self.c_solar_east or 0.0,
+                self.c_solar_south or 0.0,
+                self.c_solar_west or 0.0,
+            ]
+            rate = sum(ci * xi for ci, xi in zip(c, x)) + self.mlr_intercept
+
+            if self.rate_lo is not None and self.rate_hi is not None:
+                span = self.rate_hi - self.rate_lo
+                rate = min(max(rate, self.rate_lo - 0.25 * span), self.rate_hi + 0.25 * span)
+
             return rate
 
         elif self.slope is not None and self.intercept is not None:

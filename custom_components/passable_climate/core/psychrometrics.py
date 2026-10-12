@@ -9,6 +9,17 @@ import math
 
 ATM_PRESSURE_HPA: float = 1013.25  # Standard sea-level barometric pressure (hPa)
 
+# Bolton (1980) Magnus constants — identical to climate_sensors.yaml so runtime AH/dew point
+# match the exact distribution the MLR models were trained on.
+_MAG_A: float = 6.112
+_MAG_B: float = 17.67
+_MAG_C: float = 243.5
+
+
+def pressure_from_elevation(elev_m: float) -> float:
+    """ISA barometric pressure (hPa) for a site elevation in metres."""
+    return ATM_PRESSURE_HPA * (1.0 - 2.25577e-5 * float(elev_m)) ** 5.25588
+
 
 class PsychrometricEngine:
     """High-precision psychrometric calculations for moist air."""
@@ -27,11 +38,11 @@ class PsychrometricEngine:
 
     @classmethod
     def saturation_vapor_pressure(cls, temp_f: float) -> float:
-        """Arden Buck equation for saturation vapor pressure over water (hPa).
-        Valid with high accuracy across -40°C to +50°C.
+        """Bolton (1980) Magnus equation for saturation vapor pressure over water (hPa).
+        Valid with high accuracy (<0.3% error) across 0°C to 40°C.
         """
         t_c = cls.f_to_c(temp_f)
-        return 6.1121 * math.exp((18.678 * t_c) / (234.5 + t_c))
+        return _MAG_A * math.exp((_MAG_B * t_c) / (t_c + _MAG_C))
 
     @classmethod
     def actual_vapor_pressure(cls, temp_f: float, rh: float) -> float:
@@ -41,15 +52,15 @@ class PsychrometricEngine:
 
     @classmethod
     def dew_point(cls, temp_f: float, rh: float) -> float:
-        """Calculates dew point temperature in Fahrenheit."""
+        """Calculates dew point temperature in Fahrenheit using exact Magnus inversion."""
         vp = cls.actual_vapor_pressure(temp_f, rh)
         if vp <= 0.001:
-            return 32.0
-        alpha = math.log(vp / 6.1121)
-        denom = 17.502 - alpha
+            return -40.0
+        alpha = math.log(vp / _MAG_A)
+        denom = _MAG_B - alpha
         if abs(denom) < 1e-6:
             return temp_f
-        dp_c = (240.97 * alpha) / denom
+        dp_c = (_MAG_C * alpha) / denom
         return cls.c_to_f(dp_c)
 
     @classmethod

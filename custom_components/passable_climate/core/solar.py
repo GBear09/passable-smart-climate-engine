@@ -48,6 +48,21 @@ def calculate_solar_position(dt_utc: datetime.datetime, lat: float, lon: float) 
 
     return elevation, azimuth
 
+def facade_solar_features(
+    irradiance_watts: float, az_sin: float, az_cos: float
+) -> tuple[float, float, float]:
+    """Decomposes irradiance into non-negative cardinal facade components (East, South, West).
+    A facade facing away from the sun receives 0, never negative solar radiation.
+    Returns: (solar_east, solar_south, solar_west)
+    """
+    if irradiance_watts <= 0.0:
+        return 0.0, 0.0, 0.0
+    s_east = irradiance_watts * max(0.0, az_sin)
+    s_south = irradiance_watts * max(0.0, -az_cos)
+    s_west = irradiance_watts * max(0.0, -az_sin)
+    return s_east, s_south, s_west
+
+
 def decompose_facade_insolation(
     elevation_deg: float, azimuth_deg: float, irradiance_watts: float
 ) -> tuple[float, float, float, float, float]:

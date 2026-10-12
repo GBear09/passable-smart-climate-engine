@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import requests
 
+from ..core.solar import facade_solar_features
+
 _LOGGER = logging.getLogger(__name__)
 
 class InfluxClient:
@@ -204,10 +206,14 @@ class InfluxClient:
             if self.version == "1":
                 auth = (self.username, self.password) if self.username and self.password else None
                 query_str = (
-                    f"SELECT value, {out_field}, {in_field}, wind_speed, cloud_coverage, "
-                    f"sun_elevation, sun_azimuth, solcast_power, actual_solar_power "
+                    f'SELECT mean("value") AS "value", mean("{out_field}") AS "{out_field}", '
+                    f'mean("{in_field}") AS "{in_field}", mean("wind_speed") AS "wind_speed", '
+                    f'mean("cloud_coverage") AS "cloud_coverage", mean("sun_elevation") AS "sun_elevation", '
+                    f'last("sun_azimuth") AS "sun_azimuth", mean("solcast_power") AS "solcast_power", '
+                    f'mean("actual_solar_power") AS "actual_solar_power" '
                     f'FROM "{measurement_name}" '
-                    f"WHERE entity_id = '{entity_id}' AND time > now() - {time_range_str}"
+                    f"WHERE entity_id = '{entity_id}' AND time > now() - {time_range_str} "
+                    f"GROUP BY time(5m) fill(none)"
                 )
                 resp = requests.get(
                     f"{self.base_url}/query",
@@ -273,10 +279,11 @@ class InfluxClient:
                             else:
                                 irradiance = elev * ((100.0 - clouds) / 100.0) if elev > 0 else 0.0
 
-                            solar_east = irradiance * az_sin if irradiance > 0 else 0.0
-                            solar_south = irradiance * az_cos if irradiance > 0 else 0.0
+                            s_east, s_south, s_west = facade_solar_features(
+                                irradiance if elev > 0 else 0.0, az_sin, az_cos
+                            )
 
-                            data_list.append((rate, delta_t, wind_draft, clouds, solar_east, solar_south))
+                            data_list.append((rate, delta_t, wind_draft, clouds, s_east, s_south, s_west))
 
             elif self.version == "2":
                 headers = {
@@ -288,6 +295,7 @@ class InfluxClient:
                     from(bucket: "{self.bucket}")
                     |> range(start: -{time_range_str})
                     |> filter(fn: (r) => r["_measurement"] == "{measurement_name}" and r["entity_id"] == "{entity_id}")
+                    |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
                     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
                 """
                 resp = requests.post(
@@ -365,10 +373,11 @@ class InfluxClient:
                             else:
                                 irradiance = elev * ((100.0 - clouds) / 100.0) if elev > 0 else 0.0
 
-                            solar_east = irradiance * az_sin if irradiance > 0 else 0.0
-                            solar_south = irradiance * az_cos if irradiance > 0 else 0.0
+                            s_east, s_south, s_west = facade_solar_features(
+                                irradiance if elev > 0 else 0.0, az_sin, az_cos
+                            )
 
-                            data_list.append((rate, delta_t, wind_draft, clouds, solar_east, solar_south))
+                            data_list.append((rate, delta_t, wind_draft, clouds, s_east, s_south, s_west))
 
             return data_list, uses_true_solcast
 
