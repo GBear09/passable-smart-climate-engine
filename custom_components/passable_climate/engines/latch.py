@@ -16,6 +16,10 @@ SAFETY_SCENARIOS = frozenset({
     "overcooling",
     "overheating",
     "comfort_recovery",
+    "block_outside_heat",
+    "fall_trap_heat",
+    "veto_temp_rise",
+    "veto_temp_drop",
     "weather_unstable",
     "latent_breach",
 })

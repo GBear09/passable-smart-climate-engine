@@ -266,16 +266,20 @@ class InfluxClient:
                             az_cos = math.cos(az_rad)
                             wind_draft = wind * delta_t
 
-                            if uses_actual_solar and len(row) > actual_idx and row[actual_idx] is not None:
+                            if uses_actual_solar:
+                                if len(row) <= actual_idx or row[actual_idx] is None:
+                                    continue
                                 try:
                                     irradiance = float(row[actual_idx])
                                 except ValueError:
-                                    irradiance = 0.0
-                            elif uses_true_solcast and len(row) > solcast_idx and row[solcast_idx] is not None:
+                                    continue
+                            elif uses_true_solcast:
+                                if len(row) <= solcast_idx or row[solcast_idx] is None:
+                                    continue
                                 try:
                                     irradiance = float(row[solcast_idx])
                                 except ValueError:
-                                    irradiance = 0.0
+                                    continue
                             else:
                                 irradiance = elev * ((100.0 - clouds) / 100.0) if elev > 0 else 0.0
 
@@ -360,16 +364,20 @@ class InfluxClient:
                             az_cos = math.cos(az_rad)
                             wind_draft = wind * delta_t
 
-                            if uses_actual_solar and len(row) > actual_idx and row[actual_idx]:
+                            if uses_actual_solar:
+                                if len(row) <= actual_idx or not row[actual_idx]:
+                                    continue
                                 try:
                                     irradiance = float(row[actual_idx])
                                 except ValueError:
-                                    irradiance = 0.0
-                            elif uses_true_solcast and len(row) > solcast_idx and row[solcast_idx]:
+                                    continue
+                            elif uses_true_solcast:
+                                if len(row) <= solcast_idx or not row[solcast_idx]:
+                                    continue
                                 try:
                                     irradiance = float(row[solcast_idx])
                                 except ValueError:
-                                    irradiance = 0.0
+                                    continue
                             else:
                                 irradiance = elev * ((100.0 - clouds) / 100.0) if elev > 0 else 0.0
 

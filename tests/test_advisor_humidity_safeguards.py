@@ -218,6 +218,46 @@ class TestAdvisorHumiditySafeguards(unittest.TestCase):
         self.assertIn("Humidification is also needed", plan.details_message)
         self.assertTrue(plan.comfort_recovery_triggered)
 
+    def test_dew_point_ceiling_enforced_when_hvac_off(self):
+        """Outdoor air exceeding dew point ceiling must be rejected even when hvac_mode is off."""
+        from custom_components.passable_climate.engines.advisor import is_outside_air_favorable
+
+        # Indoor: 84°F, 45% RH (h ≈ 33.8 BTU/lb). Outdoor: 71°F, 90% RH (h ≈ 32.8 BTU/lb, DP ≈ 68°F)
+        favorable, reason = is_outside_air_favorable(
+            outside_temp=71.0,
+            outside_rh=90.0,
+            inside_temp=84.0,
+            inside_rh=45.0,
+            hvac_mode="off",
+            seasonal_mode="normal",
+            inside_lower_bound=25.0,
+            inside_upper_bound=60.0,
+            safe_min_temp=62.0,
+            safe_max_temp=80.0,
+            max_dew_point=58.0,
+        )
+        self.assertFalse(favorable)
+        self.assertIn("dew point", reason.lower())
+
+    def test_macro_override_does_not_open_into_hotter_outdoor_air(self):
+        """macro_override must not allow opening windows in cooling mode when outdoor temp > indoor temp."""
+        from custom_components.passable_climate.engines.advisor import is_outside_air_favorable
+
+        favorable, _ = is_outside_air_favorable(
+            outside_temp=76.5,
+            outside_rh=40.0,
+            inside_temp=75.0,
+            inside_rh=50.0,
+            hvac_mode="cool",
+            seasonal_mode="heatwave_prep",
+            inside_lower_bound=25.0,
+            inside_upper_bound=60.0,
+            safe_min_temp=62.0,
+            safe_max_temp=80.0,
+            macro_override=True,
+        )
+        self.assertFalse(favorable)
+
 
 if __name__ == "__main__":
     unittest.main()

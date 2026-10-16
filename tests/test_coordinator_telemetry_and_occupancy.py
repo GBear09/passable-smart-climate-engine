@@ -205,6 +205,28 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
         await self.coordinator._async_command_bool("input_boolean.test", True)
         self.coordinator.hass.services.async_call.assert_called_once()
 
+    async def test_manual_boolean_override_reconciliation(self):
+        """If a user manually toggles an input_boolean against _last_commanded, _async_command_bool must reconcile."""
+        self.coordinator.actuation_enabled = True
+        st = mock.MagicMock()
+        st.state = "off"
+        self.coordinator.hass.states.get.return_value = st
+        self.coordinator.hass.services.async_call = mock.AsyncMock()
+
+        # First call turns it on
+        await self.coordinator._async_command_bool("input_boolean.eco", True)
+        self.assertEqual(self.coordinator.hass.services.async_call.call_count, 1)
+        st.state = "on"
+
+        # Second call with state already "on" is idempotent (no service call)
+        await self.coordinator._async_command_bool("input_boolean.eco", True)
+        self.assertEqual(self.coordinator.hass.services.async_call.call_count, 1)
+
+        # User manually turns it "off" while coordinator still commands True -> reconciles
+        st.state = "off"
+        await self.coordinator._async_command_bool("input_boolean.eco", True)
+        self.assertEqual(self.coordinator.hass.services.async_call.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

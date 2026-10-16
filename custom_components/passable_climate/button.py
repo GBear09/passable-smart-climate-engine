@@ -30,6 +30,7 @@ class PassableRetrainModelsButton(CoordinatorEntity[SmartClimateCoordinator], Bu
 
     def __init__(self, coordinator: SmartClimateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._attr_unique_id = f"passable_climate_{entry.entry_id}_retrain_models"
         self.entity_id = "button.passable_climate_retrain_thermal_models"
         self._attr_name = "Retrain Thermal Models"
@@ -44,7 +45,9 @@ class PassableRetrainModelsButton(CoordinatorEntity[SmartClimateCoordinator], Bu
 
     async def async_press(self) -> None:
         """Triggers the background training job."""
-        self.hass.async_create_task(self.coordinator.async_retrain_models())
+        self._entry.async_create_background_task(
+            self.hass, self.coordinator.async_retrain_models(), "passable_climate_button_retrain"
+        )
 
 class PassableRefreshAdvisorButton(CoordinatorEntity[SmartClimateCoordinator], ButtonEntity):
     """Manually forces an immediate evaluation of the window advisor and simulation plan."""

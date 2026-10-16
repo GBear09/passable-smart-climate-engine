@@ -69,7 +69,7 @@ def decompose_facade_insolation(
     """Decomposes total irradiance into cardinal facade incident components.
     Returns: (solar_south, solar_east, solar_west, az_sin, az_cos)
     """
-    if elevation_deg <= 0 or irradiance_watts <= 0:
+    if elevation_deg <= 0:
         return 0.0, 0.0, 0.0, 0.0, 0.0
 
     az_rad = math.radians(azimuth_deg)
@@ -78,6 +78,8 @@ def decompose_facade_insolation(
 
     az_sin = math.sin(az_rad)
     az_cos = math.cos(az_rad)
+    if irradiance_watts <= 0:
+        return 0.0, 0.0, 0.0, az_sin, az_cos
 
     # South facade: maximum exposure when sun is directly South (azimuth 180°, cos(180°)=-1)
     solar_south = irradiance_watts * max(0.0, -az_cos) * cos_el

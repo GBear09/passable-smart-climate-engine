@@ -111,6 +111,7 @@ def train_all_models_sync(
         if mlr_data and len(mlr_data) >= 300:
             coeffs, mlr_intercept, std_coeffs = multiple_linear_regression(mlr_data)
             if coeffs and mlr_intercept is not None and len(coeffs) == 6:
+                arr = np.asarray(mlr_data, dtype=float)
                 c_dt, c_wd, c_c, c_se, c_ss, c_sw = coeffs
                 is_open_model = key.endswith("_win_open")
 
@@ -129,6 +130,10 @@ def train_all_models_sync(
                 # Clamp small negative noise on open-window wind draft (-0.01 < c < 0) to 0.0:
                 if is_open_model and c_wd > -0.01:
                     c_wd = max(0.0, c_wd)
+
+                # Re-anchor intercept to preserve zero mean residual after coefficient clamping
+                clamped_vec = np.array([c_dt, c_wd, c_c, c_se, c_ss, c_sw], dtype=float)
+                mlr_intercept = float(np.mean(arr[:, 0]) - np.dot(np.mean(arr[:, 1:], axis=0), clamped_vec))
 
                 # Synchronize standardized coefficients with physical clamping:
                 if std_coeffs and len(std_coeffs) == 6:
@@ -160,19 +165,18 @@ def train_all_models_sync(
                 )
 
                 if is_sane:
-                    arr = np.asarray(mlr_data, dtype=float)
                     model.feature_lo = np.percentile(arr[:, 1:], 1, axis=0).round(4).tolist()
                     model.feature_hi = np.percentile(arr[:, 1:], 99, axis=0).round(4).tolist()
                     model.rate_lo, model.rate_hi = (float(v) for v in np.percentile(arr[:, 0], [0.5, 99.5]))
 
                     model.model_type = "mlr"
-                    model.c_delta_t = round(c_dt, 4)
-                    model.c_wind_draft = round(c_wd, 4)
-                    model.c_clouds = round(c_c, 4)
+                    model.c_delta_t = round(c_dt, 6)
+                    model.c_wind_draft = round(c_wd, 7)
+                    model.c_clouds = round(c_c, 6)
                     model.c_irradiance = 0.0
-                    model.c_solar_east = round(c_se, 4)
-                    model.c_solar_south = round(c_ss, 4)
-                    model.c_solar_west = round(c_sw, 4)
+                    model.c_solar_east = round(c_se, 7)
+                    model.c_solar_south = round(c_ss, 7)
+                    model.c_solar_west = round(c_sw, 7)
                     model.mlr_intercept = round(mlr_intercept, 4)
                     model.mlr_data_points = len(mlr_data)
                     model.uses_true_solcast = uses_true_solcast

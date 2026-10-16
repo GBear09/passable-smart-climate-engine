@@ -16,7 +16,9 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_AQI_ENTITY,
+    CONF_AQI_THRESHOLD,
     CONF_BEDTIME_START,
+    CONF_CIRC_COOLDOWN_MINUTES,
     CONF_CIRC_DELTA_THRESHOLD,
     CONF_CIRC_LOCKOUT_HOURS,
     CONF_CIRC_MAX_MINUTES,
@@ -30,6 +32,7 @@ from .const import (
     CONF_CLOSE_TEMP_MARGIN,
     CONF_COMFORT_PROFILE,
     CONF_COMFORT_RECOVERY_BOOLEAN,
+    CONF_DOWNSTAIRS_CIRC_ENABLED,
     CONF_FORECAST_LOOKAHEAD_MINUTES,
     CONF_HIGH_WIND_GUST,
     CONF_HIGH_WIND_SPEED,
@@ -68,9 +71,9 @@ from .const import (
     CONF_WINDOW_ECO_BOOLEAN,
     CONF_ZONE_NAME,
     CONF_ZONES,
-    CONF_DOWNSTAIRS_CIRC_ENABLED,
     DEFAULT_AQI_THRESHOLD,
     DEFAULT_BEDTIME_START,
+    DEFAULT_CIRC_COOLDOWN_MINUTES,
     DEFAULT_CIRC_DELTA_THRESHOLD,
     DEFAULT_CIRC_LOCKOUT_HOURS,
     DEFAULT_CIRC_MAX_MINUTES,
@@ -367,7 +370,7 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
     async def async_step_thermodynamic_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Adjusts enthalpy and temperature deadbands."""
+        """Adjusts enthalpy, temperature deadbands, and MLR retraining parameters."""
         if user_input is not None:
             new_options = {**self.config_entry.options, **user_input}
             return self.async_create_entry(title="", data=new_options)
@@ -386,6 +389,12 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_CLOSE_TEMP_MARGIN, default=opts.get(CONF_CLOSE_TEMP_MARGIN, DEFAULT_CLOSE_TEMP_MARGIN)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=0.0, max=1.0, step=0.1, unit_of_measurement="°F")
+                ),
+                vol.Required(CONF_INFLUX_RETRAIN_HOURS, default=opts.get(CONF_INFLUX_RETRAIN_HOURS, DEFAULT_INFLUX_RETRAIN_HOURS)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=6, max=168, step=6, unit_of_measurement="hours")
+                ),
+                vol.Required(CONF_INFLUX_LOOKBACK_DAYS, default=opts.get(CONF_INFLUX_LOOKBACK_DAYS, DEFAULT_INFLUX_LOOKBACK_DAYS)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=30, max=730, step=30, unit_of_measurement="days")
                 ),
             }
         )
@@ -414,6 +423,9 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_MAX_PRECIPITATION_PROBABILITY, default=opts.get(CONF_MAX_PRECIPITATION_PROBABILITY, DEFAULT_MAX_PRECIPITATION_PROBABILITY)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=10.0, max=50.0, step=5.0, unit_of_measurement="%")
+                ),
+                vol.Required(CONF_AQI_THRESHOLD, default=opts.get(CONF_AQI_THRESHOLD, DEFAULT_AQI_THRESHOLD)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=50, max=300, step=5, unit_of_measurement="AQI")
                 ),
                 vol.Required(CONF_PREEMPTIVE_ECO_MODE, default=opts.get(CONF_PREEMPTIVE_ECO_MODE, DEFAULT_PREEMPTIVE_ECO_MODE)): selector.BooleanSelector(),
             }
@@ -457,6 +469,9 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_CIRC_LOCKOUT_HOURS, default=opts.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=6, step=1, unit_of_measurement="hours")
+                ),
+                vol.Required(CONF_CIRC_COOLDOWN_MINUTES, default=opts.get(CONF_CIRC_COOLDOWN_MINUTES, DEFAULT_CIRC_COOLDOWN_MINUTES)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=5, max=120, step=5, unit_of_measurement="min")
                 ),
             }
         )

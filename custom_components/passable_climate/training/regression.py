@@ -47,13 +47,13 @@ def ransac_linear_fit(
             if inlier_count > best_inlier_count and inlier_count >= min_inliers:
                 best_inlier_count = inlier_count
                 best_inliers_mask = inlier_mask
-                # Refit using all inliers via standard least squares
-                inliers = data[inlier_mask]
-                A = np.c_[inliers[:, 0], np.ones(inliers.shape[0])]
-                m_fit, b_fit = np.linalg.lstsq(A, inliers[:, 1], rcond=None)[0]
-                best_model = (float(m_fit), float(b_fit))
 
-        if best_model and best_inliers_mask is not None:
+        if best_inliers_mask is not None:
+            # Refit once using all inliers via standard least squares
+            inliers = data[best_inliers_mask]
+            A = np.c_[inliers[:, 0], np.ones(inliers.shape[0])]
+            m_fit, b_fit = np.linalg.lstsq(A, inliers[:, 1], rcond=None)[0]
+            best_model = (float(m_fit), float(b_fit))
             return best_model, best_inliers_mask.tolist()
 
         return None, None
@@ -72,7 +72,7 @@ def multiple_linear_regression(
     """
     try:
         if alphas is None:
-            alphas = [10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 25000.0, 50000.0]
+            alphas = [0.1, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0]
 
         data = np.array(data_list, dtype=np.float64)
         if data.shape[0] <= data.shape[1] or data.shape[0] < 50:

@@ -297,14 +297,18 @@ class PassableOutdoorEnthalpySensor(CoordinatorEntity[SmartClimateCoordinator], 
         w_temp = self.coordinator._get_attr(weather_ent, "temperature")
         w_rh = self.coordinator._get_attr(weather_ent, "humidity")
         if w_temp is not None and w_rh is not None:
-            t_unit, _ = self.coordinator._weather_units(weather_ent)
-            temp_f = self.coordinator._to_f(float(w_temp), t_unit)
-            return round(
-                PsychrometricEngine.specific_enthalpy(
-                    temp_f, float(w_rh), pressure_hpa=self.coordinator.pressure_hpa
-                ),
-                2,
-            )
+            try:
+                t_unit, _ = self.coordinator._weather_units(weather_ent)
+                temp_f = self.coordinator._to_f(float(w_temp), t_unit)
+                rh_val = float(w_rh)
+                return round(
+                    PsychrometricEngine.specific_enthalpy(
+                        temp_f, rh_val, pressure_hpa=self.coordinator.pressure_hpa
+                    ),
+                    2,
+                )
+            except (TypeError, ValueError):
+                return None
         return None
 
 class PassableZoneEnthalpyDeltaSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
@@ -343,21 +347,25 @@ class PassableZoneEnthalpyDeltaSensor(CoordinatorEntity[SmartClimateCoordinator]
             self.coordinator.entry_data.get(CONF_WEATHER_ENTITY, DEFAULT_WEATHER_ENTITY),
         )
 
-        in_temp_raw = self.coordinator._get_val(t_ent)
-        in_rh = self.coordinator._get_val(h_ent)
+        in_temp_raw = self.coordinator._read_float(t_ent, lo=-10.0, hi=110.0)
+        in_rh = self.coordinator._read_float(h_ent, lo=1.0, hi=100.0)
         out_temp_raw = self.coordinator._get_attr(weather_ent, "temperature")
         out_rh = self.coordinator._get_attr(weather_ent, "humidity")
 
         if in_temp_raw is not None and in_rh is not None and out_temp_raw is not None and out_rh is not None:
-            t_unit, _ = self.coordinator._weather_units(weather_ent)
-            out_temp = self.coordinator._to_f(float(out_temp_raw), t_unit)
-            in_unit = self.coordinator._get_attr(t_ent, "unit_of_measurement", "°F")
-            in_temp = self.coordinator._to_f(float(in_temp_raw), in_unit)
-            h_in = PsychrometricEngine.specific_enthalpy(
-                in_temp, float(in_rh), pressure_hpa=self.coordinator.pressure_hpa
-            )
-            h_out = PsychrometricEngine.specific_enthalpy(
-                out_temp, float(out_rh), pressure_hpa=self.coordinator.pressure_hpa
-            )
-            return round(h_in - h_out, 2)
+            try:
+                t_unit, _ = self.coordinator._weather_units(weather_ent)
+                out_temp = self.coordinator._to_f(float(out_temp_raw), t_unit)
+                out_rh_val = float(out_rh)
+                in_unit = self.coordinator._get_attr(t_ent, "unit_of_measurement", "°F")
+                in_temp = self.coordinator._to_f(float(in_temp_raw), in_unit)
+                h_in = PsychrometricEngine.specific_enthalpy(
+                    in_temp, float(in_rh), pressure_hpa=self.coordinator.pressure_hpa
+                )
+                h_out = PsychrometricEngine.specific_enthalpy(
+                    out_temp, out_rh_val, pressure_hpa=self.coordinator.pressure_hpa
+                )
+                return round(h_in - h_out, 2)
+            except (TypeError, ValueError):
+                return None
         return None

@@ -63,6 +63,7 @@
           "recommendation_entity": "Overview Text Helper (e.g. input_text.comfort_profile_overview)",
           "predict_heat_boolean": "Predict Heat Needed Boolean",
           "prediction_message_text": "Prediction Message Text Helper",
+          "hvac_transition_offset_entity": "HVAC Transition Offset Helper",
           "comfort_recovery_boolean": "Comfort Recovery Mode Boolean"
         }
       }
@@ -83,29 +84,34 @@
       },
       "thermodynamic_settings": {
         "title": "Thermodynamic & Enthalpy Deadbands",
-        "description": "Adjust minimum enthalpy advantage and temperature deadbands for window recommendations.",
+        "description": "Adjust minimum enthalpy advantage, temperature deadbands, and MLR retraining intervals.",
         "data": {
           "min_enthalpy_delta": "Minimum Enthalpy Advantage (BTU/lb)",
           "max_dew_point": "Maximum Outdoor Dew Point (°F)",
           "open_temp_margin": "Open Window Target Margin (°F)",
-          "close_temp_margin": "Close Window Hysteresis Margin (°F)"
+          "close_temp_margin": "Close Window Hysteresis Margin (°F)",
+          "influx_retrain_hours": "Model Retraining Interval (Hours)",
+          "influx_lookback_days": "Historical Training Lookback (Days)"
         },
         "data_description": {
           "min_enthalpy_delta": "Total energy advantage (sensible + latent) required before recommending open windows. Default: 1.2 BTU/lb. Higher (1.5-2.0): Conservative; only opens when outside is significantly cooler and drier. Lower (0.6-1.0): Aggressive; opens with minor cooling advantages.",
           "max_dew_point": "Absolute outdoor moisture ceiling allowed for ventilation. Default: 58.0°F. Higher (60-65°F): Tolerates higher humidity, but may introduce indoor clamminess. Lower (50-55°F): Stricter humidity control; keeps indoor air crisp and dry.",
           "open_temp_margin": "Temperature above active cooling setpoint before open window recommendation triggers. Default: 1.0°F. Higher (1.5-2.5°F): Delays opening until room warms up further. Lower (0.5-0.8°F): Prompts opening earlier as indoor temperature begins to drift.",
-          "close_temp_margin": "Hysteresis deadband below target setpoint before calling to close windows. Default: 0.2°F. Higher (0.4-0.8°F): Allows deeper free overcooling to store thermal mass. Lower (0.0-0.2°F): Closes promptly upon reaching target to avoid chilly drafts."
+          "close_temp_margin": "Hysteresis deadband below target setpoint before calling to close windows. Default: 0.2°F. Higher (0.4-0.8°F): Allows deeper free overcooling to store thermal mass. Lower (0.0-0.2°F): Closes promptly upon reaching target to avoid chilly drafts.",
+          "influx_retrain_hours": "Interval between automatic background MLR model retraining runs. Default: 24 hours.",
+          "influx_lookback_days": "Historical window queried from InfluxDB for building regression models. Default: 365 days."
         }
       },
       "veto_settings": {
         "title": "Hazard Safety & Dwell Limits",
-        "description": "Configure safety thresholds for precipitation, high wind, and minimum open window dwell duration.",
+        "description": "Configure safety thresholds for precipitation, high wind, AQI, and minimum open window dwell duration.",
         "data": {
           "open_dwell_minutes": "Minimum Window Open Dwell Duration (Minutes)",
           "forecast_lookahead_minutes": "Hazard Forecast Lookahead Window (Minutes)",
           "high_wind_speed": "High Sustained Wind Speed Limit (mph)",
           "high_wind_gust": "High Wind Gust Limit (mph)",
           "max_precipitation_probability": "Maximum Precipitation Probability (%)",
+          "aqi_threshold": "Maximum Outdoor Air Quality Index (AQI)",
           "preemptive_eco_mode": "Enable Pre-emptive HVAC Eco Mode"
         },
         "data_description": {
@@ -114,6 +120,7 @@
           "high_wind_speed": "Maximum sustained wind speed before closing windows for safety. Default: 18.0 mph. Higher (20-25 mph): Permits ventilation in breezier conditions. Lower (12-15 mph): Closes windows in gentle breezes to prevent drafts or door slamming.",
           "high_wind_gust": "Maximum peak wind gust speed that immediately triggers a window close veto. Default: 25.0 mph. Higher (30-35 mph): Tolerates occasional gusty conditions. Lower (18-20 mph): Instantly locks windows closed upon any sudden gust.",
           "max_precipitation_probability": "Forecast rain probability that triggers an automatic close veto. Default: 25.0%. Higher (35-45%): Tolerates slight chances of precipitation. Lower (10-15%): Strict rain protection; vetoes opening at any slight hint of rain.",
+          "aqi_threshold": "Maximum outdoor AQI allowed before windows are vetoed closed. Default: 100 AQI.",
           "preemptive_eco_mode": "When enabled, the advisor automatically requests HVAC Eco Mode as soon as open windows are recommended. When disabled (default), Eco Mode is only engaged reactively once physical window contact sensors detect that windows are actually open."
         }
       },
@@ -127,7 +134,8 @@
           "circulation_min_minutes": "Minimum Run Time (Minutes)",
           "circulation_max_minutes": "Maximum Run Time (Minutes)",
           "circulation_stall_margin": "Stall Detection Margin (°F)",
-          "circulation_lockout_hours": "Post-Stall Lockout Duration (Hours)"
+          "circulation_lockout_hours": "Post-Stall Lockout Duration (Hours)",
+          "circulation_cooldown_minutes": "Post-Target Cooldown Duration (Minutes)"
         },
         "data_description": {
           "upstairs_circ_enabled": "Automates HVAC fan circulation between Upstairs and Attic when thermal conditions are favorable. Requires attic temperature sensor.",
@@ -136,7 +144,8 @@
           "circulation_min_minutes": "Anti-short-cycle duration. Fan runs for at least this duration once started. Default: 15 min. Higher (20-30 min): Protects blower motor from frequent cycling. Lower (10 min): Allows faster shutoff if reservoir depletes.",
           "circulation_max_minutes": "Maximum continuous run time for a single circulation cycle. Default: 120 min. Higher (150-180 min): Allows extended circulation during long heatwaves. Lower (60-90 min): Prevents running if reservoir temperatures equalize.",
           "circulation_stall_margin": "Thermal effectiveness check. After 20 minutes, if temperature change lags behind building model by this margin, cycle is flagged as stalled. Default: 0.2°F. Higher (0.3-0.4°F): Stricter; quickly stops ineffective circulation. Lower (0.1°F): More patient with heavy thermal mass.",
-          "circulation_lockout_hours": "Cooldown lockout period after a stalled run or maximum runtime, allowing the thermal reservoir to recharge. Default: 1 hour. Higher (2-3 hrs): Gives attic/basement more time to re-establish thermal separation. Lower (1 hr): Retries circulation sooner."
+          "circulation_lockout_hours": "Cooldown lockout period after a stalled run or maximum runtime, allowing the thermal reservoir to recharge. Default: 1 hour. Higher (2-3 hrs): Gives attic/basement more time to re-establish thermal separation. Lower (1 hr): Retries circulation sooner.",
+          "circulation_cooldown_minutes": "Minimum rest period after reaching target temperature before starting another circulation cycle. Default: 30 min."
         }
       }
     }

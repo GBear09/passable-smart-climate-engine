@@ -183,6 +183,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._recovery_since: datetime.datetime | None = None
         self.actuation_enabled: bool = False
         self._circ_lock = asyncio.Lock()
+        self._train_lock = asyncio.Lock()
         self.last_update_time: datetime.datetime | None = None
 
         elevation_m = float(getattr(hass.config, "elevation", 0.0) or 0.0)
@@ -327,8 +328,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not math.isfinite(val) or not (lo <= val <= hi):
             return None
         if max_age is not None:
-            seen = getattr(st, "last_reported", None) or st.last_updated
-            if seen and (dt_util.utcnow() - seen) > max_age:
+            seen = getattr(st, "last_reported", None) or getattr(st, "last_updated", None)
+            if isinstance(seen, datetime.datetime) and (dt_util.utcnow() - seen) > max_age:
                 return None
         return val
 
@@ -377,17 +378,18 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return out
 
     async def _async_command_bool(self, entity_id: str | None, on: bool) -> None:
-        """Edge-triggered idempotent boolean actuation."""
+        """Edge-triggered idempotent boolean actuation reconciled with live HA state."""
         if not entity_id or not self.actuation_enabled:
-            return
-        if self._last_commanded.get(entity_id) == on:
             return
         st = self.hass.states.get(entity_id)
         if st is None:
             _LOGGER.debug("Skipping missing helper %s", entity_id)
             return
+        is_currently_on = (st.state == "on")
+        if self._last_commanded.get(entity_id) == on and is_currently_on == on:
+            return
         self._last_commanded[entity_id] = on
-        if (st.state == "on") != on:
+        if is_currently_on != on:
             await self.hass.services.async_call(
                 "input_boolean",
                 "turn_on" if on else "turn_off",
@@ -496,12 +498,17 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_e, "fan_mode": "on"})
                                     if eco_e:
                                         await self.hass.services.async_call("input_boolean", "turn_on", {"entity_id": eco_e})
-                                    in_t = self._read_float(temp_e, lo=30.0, hi=110.0) or 70.0
+                                    t_unit_c = self._get_attr(temp_e, "unit_of_measurement", "°F")
+                                    in_t_raw = self._read_float(temp_e, lo=-10.0, hi=110.0)
+                                    in_t = self._to_f(in_t_raw, t_unit_c) if in_t_raw is not None else 70.0
+                                    c_st_m = self._get_val(climate_e, "cool")
+                                    c_attrs_m = self.hass.states.get(climate_e).attributes if (climate_e and self.hass.states.get(climate_e)) else {}
+                                    eff_m = self._effective_hvac_mode(c_st_m, c_attrs_m, 70.0, in_t)
                                     mem["lockout_until"] = None
                                     mem["start_time"] = now_u
                                     mem["start_temp"] = in_t
-                                    mem["mode"] = "cool" if (self._get_val(climate_e, "cool") == "cool") else "heat"
-                                    await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                                    mem["mode"] = "heat" if eff_m == "heat" else "cool"
+                                    self._learning_store.async_delay_save(self.circulation_manager.export_learning_data, 5)
                                     await self.async_request_refresh()
                             elif new_state.state == "off":
                                 if is_running:
@@ -515,7 +522,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     mem["start_time"] = None
                                     mem["start_temp"] = None
                                     mem["mode"] = None
-                                    await self._learning_store.async_save(self.circulation_manager.export_learning_data())
+                                    self._learning_store.async_delay_save(self.circulation_manager.export_learning_data, 5)
                                     await self.async_request_refresh()
                                 else:
                                     if climate_e:
@@ -538,21 +545,25 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_retrain_models(self) -> None:
         """Executes full historical regression training in a background executor thread."""
-        lookback = int(self.options.get(CONF_INFLUX_LOOKBACK_DAYS, self.entry_data.get(CONF_INFLUX_LOOKBACK_DAYS, 365)))
-        try:
-            updated_models = await self.hass.async_add_executor_job(
-                train_all_models_sync,
-                self.influx_client,
-                lookback,
-            )
-            if updated_models:
-                self.models.update(updated_models)
-                serialized = {k: m.__dict__ for k, m in self.models.items()}
-                await self._models_store.async_save(serialized)
-                _LOGGER.info("Passable Smart Climate: Retrained and saved %d models.", len(self.models))
-                self.async_update_listeners()
-        except Exception as err:
-            _LOGGER.error("Model retraining failed: %s", err)
+        if self._train_lock.locked():
+            _LOGGER.info("Model retraining already in progress; skipping duplicate request.")
+            return
+        async with self._train_lock:
+            lookback = int(self.options.get(CONF_INFLUX_LOOKBACK_DAYS, self.entry_data.get(CONF_INFLUX_LOOKBACK_DAYS, 365)))
+            try:
+                updated_models = await self.hass.async_add_executor_job(
+                    train_all_models_sync,
+                    self.influx_client,
+                    lookback,
+                )
+                if updated_models:
+                    self.models.update(updated_models)
+                    serialized = {k: m.__dict__ for k, m in self.models.items()}
+                    await self._models_store.async_save(serialized)
+                    _LOGGER.info("Passable Smart Climate: Retrained and saved %d models.", len(self.models))
+                    self.async_update_listeners()
+            except Exception as err:
+                _LOGGER.error("Model retraining failed: %s", err)
 
     @staticmethod
     def _parse_time(val: Any, default_hour: int, default_minute: int = 0) -> datetime.time:
@@ -620,6 +631,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         w_gust = self._to_mph(float(w_gust_raw or 0.0), w_unit)
         w_rh_raw = self._get_attr(weather_ent, "humidity")
         w_rh = float(w_rh_raw) if w_rh_raw is not None else None
+        weather_telemetry_degraded = (w_state is None or w_temp_raw is None or w_rh_raw is None)
 
         # Track wet ground / storm quiet period
         if w_state and str(w_state).lower() in BAD_WEATHER_CONDITIONS:
@@ -651,7 +663,15 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "condition": w_state or "cloudy",
             "cloud_coverage": 50.0,
         }
-        sanitized_forecast = self._sanitize_forecast(forecast_list, now_utc, t_unit, w_unit, obs=obs_anchor)
+        sanitized_forecast = self._sanitize_forecast(
+            forecast_list,
+            now_utc,
+            t_unit,
+            w_unit,
+            obs=obs_anchor if (forecast_list and not weather_telemetry_degraded) else None,
+        )
+        if len(sanitized_forecast) <= 1:
+            sanitized_forecast = []
 
         # Solar Coordinates
         lat = float(getattr(self.hass.config, "latitude", 0.0) or 0.0)
@@ -684,6 +704,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             max_precip_prob=float(self.options.get(CONF_MAX_PRECIPITATION_PROBABILITY, DEFAULT_MAX_PRECIPITATION_PROBABILITY)),
             aqi_threshold=float(self.options.get(CONF_AQI_THRESHOLD, DEFAULT_AQI_THRESHOLD)),
         )
+
+        if not is_vetoed and weather_telemetry_degraded:
+            is_vetoed = True
+            veto_reason = "Outdoor weather telemetry unavailable (fail-closed)"
 
         if not is_vetoed and aqi_unknown:
             is_vetoed = True
@@ -787,8 +811,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         zone_attrs_map: dict[str, dict[str, Any]] = {}
         overall_hvac_mode = "off"
 
-        protect_cool = float(self._get_val("input_number.hvac_preset_protect_cool", 78.0) or 78.0)
-        protect_heat = float(self._get_val("input_number.hvac_preset_protect_heat", 65.0) or 65.0)
+        protect_cool = self._read_float("input_number.hvac_preset_protect_cool", lo=40.0, hi=100.0) or 78.0
+        protect_heat = self._read_float("input_number.hvac_preset_protect_heat", lo=40.0, hi=100.0) or 65.0
 
         for z_key, z_conf in zones_config.items():
             climate_ent = z_conf.get(CONF_CLIMATE_ENTITY)
@@ -796,8 +820,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             c_attrs = self.hass.states.get(climate_ent).attributes if (climate_ent and self.hass.states.get(climate_ent)) else {}
             zone_climates[z_key] = c_state
             zone_attrs_map[z_key] = c_attrs
-            if c_state in ["cool", "heat"]:
-                overall_hvac_mode = c_state
+            c_eff_init = self._effective_hvac_mode(c_state, c_attrs, w_temp, 72.0)
+            if c_eff_init in ("cool", "heat"):
+                overall_hvac_mode = c_eff_init
 
             window_eco = (self._get_val(z_conf.get(CONF_WINDOW_ECO_BOOLEAN, f"input_boolean.eco_mode_request_{z_key}_hvac_advisor"), "off") == "on")
             circ_eco = (self._get_val(z_conf.get(CONF_CIRCULATION_ECO_BOOLEAN), "off") == "on")
@@ -805,12 +830,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             floor_eco = (self._get_val(f"input_boolean.eco_mode_{z_key}", "off") == "on")
             eco_active = window_eco or circ_eco or circ_act or floor_eco
 
-            home_cool = float(self._get_val(f"input_number.hvac_preset_{z_key}_home_cool", 74.0) or 74.0)
-            home_heat = float(self._get_val(f"input_number.hvac_preset_{z_key}_home_heat", 68.0) or 68.0)
-            sleep_cool_raw = self._get_val(f"input_number.hvac_preset_{z_key}_sleep_cool")
-            sleep_heat_raw = self._get_val(f"input_number.hvac_preset_{z_key}_sleep_heat")
-            sleep_cool = float(sleep_cool_raw) if sleep_cool_raw is not None else None
-            sleep_heat = float(sleep_heat_raw) if sleep_heat_raw is not None else None
+            home_cool = self._read_float(f"input_number.hvac_preset_{z_key}_home_cool", lo=40.0, hi=100.0) or 74.0
+            home_heat = self._read_float(f"input_number.hvac_preset_{z_key}_home_heat", lo=40.0, hi=100.0) or 68.0
+            sleep_cool = self._read_float(f"input_number.hvac_preset_{z_key}_sleep_cool", lo=40.0, hi=100.0)
+            sleep_heat = self._read_float(f"input_number.hvac_preset_{z_key}_sleep_heat", lo=40.0, hi=100.0)
 
             act_heat, act_cool = resolve_zone_setpoints(
                 zone_id=z_key,
@@ -880,9 +903,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             act_heat, act_cool = zone_setpoints.get(z_key, (68.0, 74.0))
 
             t_sensor_unit = self._get_attr(temp_ent, "unit_of_measurement", "°F")
-            in_temp_raw = self._read_float(temp_ent, lo=30.0, hi=110.0)
+            in_temp_raw = self._read_float(temp_ent, lo=-10.0, hi=110.0, max_age=STALE_INDOOR)
             in_temp = self._to_f(in_temp_raw, t_sensor_unit) if in_temp_raw is not None else None
-            in_hum = self._read_float(hum_ent, lo=1.0, hi=100.0)
+            if in_temp is not None and not (30.0 <= in_temp <= 110.0):
+                in_temp = None
+            in_hum = self._read_float(hum_ent, lo=1.0, hi=100.0, max_age=STALE_INDOOR)
             win_raw = self._read_float(win_ent, lo=0.0, hi=1000.0)
 
             # Fail-safe: unknown contact state is treated as OPEN for every interlock
@@ -901,6 +926,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
 
             c_eff = self._effective_hvac_mode(c_st, c_attrs, w_temp, in_temp)
+            if c_eff in ("cool", "heat"):
+                overall_hvac_mode = c_eff
 
             safe_min = min(65.0, act_heat) - 1.0
             safe_max = max(75.0, act_cool) + 1.0
@@ -944,6 +971,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 open_temp_margin=open_margin,
                 close_temp_margin=close_margin,
                 open_dwell_minutes=open_dwell,
+                pressure_hpa=self.pressure_hpa,
             )
 
             # Compressor running interlock
@@ -966,7 +994,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             eco_bool = z_conf.get(CONF_WINDOW_ECO_BOOLEAN, f"input_boolean.eco_mode_request_{z_key}_hvac_advisor")
             if eco_bool:
                 preemptive_eco = bool(self.options.get(CONF_PREEMPTIVE_ECO_MODE, DEFAULT_PREEMPTIVE_ECO_MODE))
-                desired_eco[eco_bool] = bool(plan.eco_mode_requested and preemptive_eco)
+                desired_eco[eco_bool] = bool(
+                    plan.eco_mode_requested and (preemptive_eco or compressor_active or is_open)
+                )
 
             # Exit deadband check: block recovery exit if within 3% RH of upper bound
             _, ub = get_comfort_bounds(in_temp, comfort_profile)
@@ -984,60 +1014,64 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     active_bool_ent = z_conf.get(CONF_CIRCULATION_ACTIVE_BOOLEAN)
                     eco_bool_ent = z_conf.get(CONF_CIRCULATION_ECO_BOOLEAN)
 
-                    source_temp_raw = self._read_float(source_temp_ent, lo=30.0, hi=120.0) if source_temp_ent else None
-                    source_temp = source_temp_raw if source_temp_raw is not None else in_temp
+                    src_unit = self._get_attr(source_temp_ent, "unit_of_measurement", "°F")
+                    source_temp_raw = self._read_float(source_temp_ent, lo=-10.0, hi=120.0, max_age=STALE_INDOOR) if source_temp_ent else None
+                    source_temp = self._to_f(source_temp_raw, src_unit) if source_temp_raw is not None else None
+                    if source_temp is not None and not (30.0 <= source_temp <= 120.0):
+                        source_temp = None
                     fan_is_active = (self._get_val(active_bool_ent, "off") == "on")
 
-                    cooldown_mins = float(self.options.get(CONF_CIRC_COOLDOWN_MINUTES, DEFAULT_CIRC_COOLDOWN_MINUTES))
-                    circ_action, lockout = self.circulation_manager.evaluate_circulation(
-                        z_key=z_key,
-                        area_temp=in_temp,
-                        source_temp=source_temp,
-                        target_cool=act_cool,
-                        target_heat=act_heat,
-                        hvac_mode=c_eff,
-                        seasonal_mode=seasonal_mode,
-                        windows_are_open=is_open,
-                        out_temp=w_temp,
-                        model=z_models.get("temp_closed"),
-                        now_utc=now_utc,
-                        is_active=fan_is_active,
-                        delta_threshold=float(self.options.get(CONF_CIRC_DELTA_THRESHOLD, DEFAULT_CIRC_DELTA_THRESHOLD)),
-                        min_runtime_minutes=int(self.options.get(CONF_CIRC_MIN_MINUTES, DEFAULT_CIRC_MIN_MINUTES)),
-                        max_runtime_minutes=int(self.options.get(CONF_CIRC_MAX_MINUTES, DEFAULT_CIRC_MAX_MINUTES)),
-                        stall_margin=float(self.options.get(CONF_CIRC_STALL_MARGIN, DEFAULT_CIRC_STALL_MARGIN)),
-                        lockout_hours=float(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)),
-                        cooldown_hours=cooldown_mins / 60.0,
-                    )
+                    if source_temp is not None:
+                        cooldown_mins = float(self.options.get(CONF_CIRC_COOLDOWN_MINUTES, DEFAULT_CIRC_COOLDOWN_MINUTES))
+                        circ_action, lockout = self.circulation_manager.evaluate_circulation(
+                            z_key=z_key,
+                            area_temp=in_temp,
+                            source_temp=source_temp,
+                            target_cool=act_cool,
+                            target_heat=act_heat,
+                            hvac_mode=c_eff,
+                            seasonal_mode=seasonal_mode,
+                            windows_are_open=is_open,
+                            out_temp=w_temp,
+                            model=z_models.get("temp_closed"),
+                            now_utc=now_utc,
+                            is_active=fan_is_active,
+                            delta_threshold=float(self.options.get(CONF_CIRC_DELTA_THRESHOLD, DEFAULT_CIRC_DELTA_THRESHOLD)),
+                            min_runtime_minutes=int(self.options.get(CONF_CIRC_MIN_MINUTES, DEFAULT_CIRC_MIN_MINUTES)),
+                            max_runtime_minutes=int(self.options.get(CONF_CIRC_MAX_MINUTES, DEFAULT_CIRC_MAX_MINUTES)),
+                            stall_margin=float(self.options.get(CONF_CIRC_STALL_MARGIN, DEFAULT_CIRC_STALL_MARGIN)),
+                            lockout_hours=float(self.options.get(CONF_CIRC_LOCKOUT_HOURS, DEFAULT_CIRC_LOCKOUT_HOURS)),
+                            cooldown_hours=cooldown_mins / 60.0,
+                        )
 
-                    mem = self.circulation_manager.get_zone_memory(z_key)
-                    if circ_action == "turn_on" and not fan_is_active:
-                        _LOGGER.info("Passable Smart Climate: Engaging circulation fan for %s.", z_name)
-                        mem["start_time"] = now_utc
-                        mem["start_temp"] = in_temp
-                        mem["mode"] = "cool" if (c_eff == "cool" or in_temp > act_cool) else "heat"
-                        await self._learning_store.async_save(self.circulation_manager.export_learning_data())
-                        if active_bool_ent:
-                            await self._async_command_bool(active_bool_ent, True)
-                        if eco_bool_ent:
-                            await self._async_command_bool(eco_bool_ent, True)
-                        if climate_ent and self.actuation_enabled:
-                            await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "on"}, blocking=True)
+                        mem = self.circulation_manager.get_zone_memory(z_key)
+                        if circ_action == "turn_on" and not fan_is_active:
+                            _LOGGER.info("Passable Smart Climate: Engaging circulation fan for %s.", z_name)
+                            mem["start_time"] = now_utc
+                            mem["start_temp"] = in_temp
+                            mem["mode"] = "cool" if (c_eff == "cool" or in_temp > act_cool) else "heat"
+                            self._learning_store.async_delay_save(self.circulation_manager.export_learning_data, 5)
+                            if active_bool_ent:
+                                await self._async_command_bool(active_bool_ent, True)
+                            if eco_bool_ent:
+                                await self._async_command_bool(eco_bool_ent, True)
+                            if climate_ent and self.actuation_enabled:
+                                await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "on"}, blocking=True)
 
-                    elif circ_action == "turn_off" and fan_is_active:
-                        _LOGGER.info("Passable Smart Climate: Shutting off circulation fan for %s.", z_name)
-                        if lockout > 0:
-                            mem["lockout_until"] = now_utc + datetime.timedelta(hours=lockout)
-                        mem["start_time"] = None
-                        mem["start_temp"] = None
-                        mem["mode"] = None
-                        await self._learning_store.async_save(self.circulation_manager.export_learning_data())
-                        if active_bool_ent:
-                            await self._async_command_bool(active_bool_ent, False)
-                        if eco_bool_ent:
-                            await self._async_command_bool(eco_bool_ent, False)
-                        if climate_ent and self.actuation_enabled:
-                            await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "auto"}, blocking=True)
+                        elif circ_action == "turn_off" and fan_is_active:
+                            _LOGGER.info("Passable Smart Climate: Shutting off circulation fan for %s.", z_name)
+                            if lockout > 0:
+                                mem["lockout_until"] = now_utc + datetime.timedelta(hours=lockout)
+                            mem["start_time"] = None
+                            mem["start_temp"] = None
+                            mem["mode"] = None
+                            self._learning_store.async_delay_save(self.circulation_manager.export_learning_data, 5)
+                            if active_bool_ent:
+                                await self._async_command_bool(active_bool_ent, False)
+                            if eco_bool_ent:
+                                await self._async_command_bool(eco_bool_ent, False)
+                            if climate_ent and self.actuation_enabled:
+                                await self.hass.services.async_call("climate", "set_fan_mode", {"entity_id": climate_ent, "fan_mode": "auto"}, blocking=True)
 
         # 5. Comfort Recovery Latch & Actuation Arbitration
         if any_recovery_triggered:
@@ -1082,7 +1116,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             active_scenario = next((p.scenario for p in zone_plans.values()), "standard")
 
-        safety_close = is_vetoed or latent_breach or any(p.scenario in SAFETY_SCENARIOS for p in zone_plans.values())
+        safety_close = is_vetoed or latent_breach or any(
+            p.recommended_state == CLOSE and p.scenario in SAFETY_SCENARIOS
+            for p in zone_plans.values()
+        )
 
         final_state, dwell_held = self._latch.step(
             raw_state,
@@ -1097,7 +1134,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._latch_store.async_delay_save(self._latch.as_dict, 5)
 
         # Markdown details formulation
-        ts_str = now.strftime("%-I:%M %p on %b %-d")
+        ts_str = f"{now.hour % 12 or 12}:{now.strftime('%M %p on %b')} {now.day}"
         details = f"**Action Plan as of {ts_str}:**\n\n"
         up_plan = zone_plans.get("upstairs")
         down_plan = zone_plans.get("downstairs")
@@ -1148,6 +1185,14 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # 7. Bedtime Overnight Heat Prediction Alert
         self.heat_prediction_alert = False
+        predict_heat_ent = self.options.get(
+            CONF_PREDICT_HEAT_BOOLEAN,
+            self.entry_data.get(CONF_PREDICT_HEAT_BOOLEAN, DEFAULT_PREDICT_HEAT_BOOLEAN),
+        )
+        predict_msg_ent = self.options.get(
+            CONF_PREDICTION_MESSAGE_TEXT,
+            self.entry_data.get(CONF_PREDICTION_MESSAGE_TEXT, DEFAULT_PREDICTION_MESSAGE_TEXT),
+        )
         is_alt_sleep = (self._get_val("input_boolean.sleeping_in_living_room", "off") == "on")
         eval_hist = avg_hist
         if not is_alt_sleep and up_plan and up_plan.history:
@@ -1173,14 +1218,6 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 val_from_ent = self._read_float(offset_cfg, lo=-20.0, hi=20.0)
                 offset_val = float(val_from_ent) if val_from_ent is not None else float(DEFAULT_HVAC_TRANSITION_OFFSET)
 
-            predict_heat_ent = self.options.get(
-                CONF_PREDICT_HEAT_BOOLEAN,
-                self.entry_data.get(CONF_PREDICT_HEAT_BOOLEAN, DEFAULT_PREDICT_HEAT_BOOLEAN),
-            )
-            predict_msg_ent = self.options.get(
-                CONF_PREDICTION_MESSAGE_TEXT,
-                self.entry_data.get(CONF_PREDICTION_MESSAGE_TEXT, DEFAULT_PREDICTION_MESSAGE_TEXT),
-            )
             is_prediction_on = (self._get_val(predict_heat_ent, "off") == "on")
             transition_threshold = (min_comfort_temp - offset_val) if overall_hvac_mode == "cool" else min_comfort_temp
 
@@ -1212,6 +1249,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         _LOGGER.error("Failed to set heat prediction entities: %s", e)
 
                 details += "\n\n**Note:** A switch to **Heat Mode** may be required overnight."
+
+        if not self.heat_prediction_alert and predict_heat_ent:
+            await self._async_command_bool(predict_heat_ent, False)
 
         self.last_details = details
         self.last_update_time = now_utc

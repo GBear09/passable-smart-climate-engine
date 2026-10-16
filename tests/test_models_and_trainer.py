@@ -136,6 +136,53 @@ class TestModelsAndTrainer(unittest.TestCase):
         self.assertGreaterEqual(m.c_solar_south, 0.0)
         self.assertGreaterEqual(m.c_solar_west, 0.0)
 
+    def test_decompose_facade_insolation_preserves_azimuth_when_zero_watts(self):
+        """decompose_facade_insolation must return valid azimuth sin/cos even when irradiance_watts=0."""
+        from custom_components.passable_climate.core.solar import decompose_facade_insolation
+
+        s_e, s_s, s_w, az_sin, az_cos = decompose_facade_insolation(
+            irradiance_watts=0.0, elevation_deg=45.0, azimuth_deg=180.0
+        )
+        self.assertEqual((s_e, s_s, s_w), (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(az_sin, 0.0, places=5)
+        self.assertAlmostEqual(az_cos, -1.0, places=5)
+
+    def test_watt_scale_solar_coefficient_precision(self):
+        """Watt-scale solar coefficients (~1e-4) must not be truncated by rounding."""
+        from unittest import mock
+        import numpy as np
+        from custom_components.passable_climate.training.trainer import train_all_models_sync
+
+        client = mock.MagicMock()
+        client.fetch_and_bin_profile_data.return_value = (
+            list(range(-10, 10)),
+            [0.05 * x + 0.5 for x in range(-10, 10)],
+            20,
+        )
+        rng = np.random.default_rng(7)
+        X = np.zeros((320, 6))
+        X[:, 0] = rng.uniform(-10.0, 20.0, size=320)
+        X[:, 1] = rng.uniform(-50.0, 100.0, size=320)
+        X[:, 2] = rng.uniform(0.0, 100.0, size=320)
+        X[:, 3] = rng.uniform(0.0, 3000.0, size=320)
+        X[:, 4] = rng.uniform(0.0, 4000.0, size=320)
+        X[:, 5] = rng.uniform(0.0, 3000.0, size=320)
+        Y = (
+            0.04 * X[:, 0]
+            + 0.001 * X[:, 1]
+            - 0.001 * X[:, 2]
+            + 0.00015 * X[:, 3]
+            + 0.00025 * X[:, 4]
+            + 0.00018 * X[:, 5]
+            + 0.05
+        )
+        mlr_data = [tuple([float(y)] + list(x)) for y, x in zip(Y, X)]
+        client.fetch_mlr_data.return_value = (mlr_data, True)
+
+        models = train_all_models_sync(client, lookback_days=30)
+        m = models["upstairs_temp_profile_win_closed"]
+        self.assertAlmostEqual(m.c_solar_south, 0.00025, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

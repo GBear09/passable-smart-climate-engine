@@ -186,14 +186,15 @@ def is_outside_air_favorable(
     is_currently_open: bool = False,
     macro_override: bool = False,
     is_bedtime: bool = False,
+    pressure_hpa: float = PsychrometricEngine.ATM_PRESSURE_HPA,
 ) -> tuple[bool, str]:
     """Evaluates outdoor atmospheric suitability using specific enthalpy, dew point,
     dry-bulb temperature, and comfort bounds with full hysteresis deadbands.
     """
     psy = PsychrometricEngine
 
-    h_out = psy.specific_enthalpy(outside_temp, outside_rh)
-    h_in = psy.specific_enthalpy(inside_temp, inside_rh)
+    h_out = psy.specific_enthalpy(outside_temp, outside_rh, pressure_hpa=pressure_hpa)
+    h_in = psy.specific_enthalpy(inside_temp, inside_rh, pressure_hpa=pressure_hpa)
     dp_out = psy.dew_point(outside_temp, outside_rh)
     proj_rh = psy.projected_rh(outside_temp, outside_rh, inside_temp)
 
@@ -204,7 +205,9 @@ def is_outside_air_favorable(
     humidity_buffer = -1.0 if is_currently_open else 3.0
 
     # 1. Dew Point Humidity Envelope Clamp (prevents mugginess)
-    if dp_out > dew_point_ceiling and hvac_mode == "cool":
+    if dp_out > dew_point_ceiling and (
+        hvac_mode in ("cool", "off") or seasonal_mode in ("spring_transition", "heatwave_prep")
+    ):
         return False, f"Outdoor dew point ({dp_out:.1f}°F) introduces unacceptable latent load (limit: {dew_point_ceiling:.1f}°F)."
 
     # 2. Projected RH Comfort Bounds Check
@@ -217,10 +220,12 @@ def is_outside_air_favorable(
 
     # 3. Cooling Regimes (Free Cooling, Spring Transition, Heatwave Prep)
     if hvac_mode == "cool" or seasonal_mode in ["spring_transition", "heatwave_prep"]:
-        if outside_temp >= (inside_temp - temp_margin) and not macro_override:
+        eff_temp_margin = 0.0 if macro_override else temp_margin
+        eff_enthalpy_margin = 0.0 if macro_override else enthalpy_margin
+        if outside_temp >= (inside_temp - eff_temp_margin):
             return False, f"Outdoor temperature ({outside_temp:.1f}°F) is not cool enough."
 
-        if (h_in - h_out) < enthalpy_margin and not macro_override:
+        if (h_in - h_out) < eff_enthalpy_margin:
             return False, f"Outdoor enthalpy ({h_out:.1f} BTU/lb) carries too much latent heat vs indoor ({h_in:.1f} BTU/lb)."
 
         if inside_temp <= safe_min_temp:
@@ -233,13 +238,15 @@ def is_outside_air_favorable(
         if outside_temp <= (inside_temp + temp_margin) and not macro_override:
             return False, f"Outdoor temperature ({outside_temp:.1f}°F) is not warm enough."
 
-        if (h_out - h_in) < 0.5 and not macro_override:
+        heat_enthalpy_margin = 0.1 if is_currently_open else 0.5
+        if (h_out - h_in) < heat_enthalpy_margin and not macro_override:
             return False, "Insufficient thermal energy in outdoor air."
 
         if inside_temp >= safe_max_temp:
             return False, f"Indoor temperature ({inside_temp:.1f}°F) reached safe maximum ceiling."
 
-        if dp_out < 32.0:
+        min_dp_floor = 30.0 if is_currently_open else 32.0
+        if dp_out < min_dp_floor:
             return False, f"Outdoor air is desiccatingly dry (dew point {dp_out:.1f}°F)."
 
         return True, "Favorable solar/sensible free heating."
@@ -289,10 +296,11 @@ def get_comfort_bounds(
             upper_bound = min(upper_bound, rh_at_rolloff + slope * (temp_f - roll_off_temp))
 
         # Lower Bound
-        if temp_f >= 70.0:
+        pivot_temp = max(70.0, temp_min + 2.0)
+        if temp_f >= pivot_temp:
             lower_bound = hum_min
         elif temp_f >= temp_min:
-            slope = (hum_min - 50.0) / (70.0 - temp_min)
+            slope = (hum_min - 50.0) / (pivot_temp - temp_min)
             lower_bound = 50.0 + slope * (temp_f - temp_min)
         else:
             lower_bound = 50.0
@@ -481,6 +489,7 @@ def evaluate_zone_plan(
     open_temp_margin: float = 1.0,
     close_temp_margin: float = 0.2,
     open_dwell_minutes: float = 45.0,
+    pressure_hpa: float = PsychrometricEngine.ATM_PRESSURE_HPA,
 ) -> ZonePlanResult:
     """Runs simulation and evaluates the optimal action plan for a zone.
     Implements 100% parity with legacy smart_window_advisor.py, with minute-precise
@@ -497,6 +506,7 @@ def evaluate_zone_plan(
         open_temp_margin=open_temp_margin,
         close_temp_margin=close_temp_margin,
         is_bedtime=is_bedtime,
+        pressure_hpa=pressure_hpa,
         **kwargs,
     )
 
@@ -959,7 +969,7 @@ def evaluate_zone_plan(
             is_currently_open=is_currently_open,
         )
 
-        is_safe_all_night = len(actions) == 1 and actions[0].action == "open"
+        is_safe_all_night = len(overnight_forecast) >= 2 and len(actions) == 1 and actions[0].action == "open"
         eco_flag = (seasonal_mode != "normal" and seasonal_mode != "heatwave_prep")
 
         if is_safe_all_night:

@@ -172,8 +172,8 @@ class PassableComfortNumberEntity(CoordinatorEntity[SmartClimateCoordinator], Re
             self.coordinator.comfort_settings[self.entity_description.key] = (
                 self.entity_description.default_value
             )
-        # Re-evaluate with restored envelope
-        await self.coordinator.async_request_refresh()
+        if self.coordinator.actuation_enabled:
+            await self.coordinator.async_request_refresh()
 
     async def async_set_native_value(self, value: float) -> None:
         """Set new value and trigger coordinator refresh."""

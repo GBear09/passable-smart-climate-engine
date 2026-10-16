@@ -41,14 +41,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Setup reactive listeners for window contacts and profile updates
     coordinator.async_setup_listeners()
 
-    # Perform first refresh
-    await coordinator.async_config_entry_first_refresh()
-
     # Store coordinator instance in runtime_data and domain registry
     entry.runtime_data = coordinator
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     entry.async_on_unload(coordinator.async_unload)
+
+    # Register platforms (sensor, binary_sensor, button, number) before first refresh
+    # so RestoreNumber entities populate comfort_settings prior to initial evaluation
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Perform first refresh
+    await coordinator.async_config_entry_first_refresh()
 
     # If no models are cached yet, trigger background retraining
     if not coordinator.models:
@@ -74,15 +78,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         )
 
-    # Register platforms (sensor, binary_sensor, button, number)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     # Enable actuation only once Home Assistant has fully started and restored all entities
     async def _enable_actuation(_hass: HomeAssistant) -> None:
         coordinator.actuation_enabled = True
         await coordinator.async_request_refresh()
 
-    entry.async_on_unload(async_at_started(hass, _enable_actuation))
+    if unsub_started := async_at_started(hass, _enable_actuation):
+        entry.async_on_unload(unsub_started)
 
     # Register update listener for options flow changes
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -93,7 +95,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Passable Smart Climate: Retrain models service invoked.")
         for coord in hass.data.get(DOMAIN, {}).values():
             if isinstance(coord, SmartClimateCoordinator):
-                hass.async_create_task(coord.async_retrain_models())
+                coord.entry.async_create_background_task(
+                    hass, coord.async_retrain_models(), "passable_climate_service_retrain"
+                )
 
     async def handle_refresh_plan(call: ServiceCall) -> None:
         """Service call handler to force immediate re-evaluation."""

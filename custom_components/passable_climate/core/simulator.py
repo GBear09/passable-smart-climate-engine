@@ -48,14 +48,20 @@ def run_hybrid_simulation(
     for i in range(len(forecast)):
         current_f = forecast[i]
         next_f = forecast[i + 1] if i + 1 < len(forecast) else current_f
-        hourly_action: str | None = None
+        first_step_open = False
+        open_steps = 0
 
         for step in range(STEPS_PER_HOUR):
             progress = step / STEPS_PER_HOUR
             outside_temp = current_f["temperature"] + (next_f["temperature"] - current_f["temperature"]) * progress
             outside_humidity = current_f["humidity"] + (next_f["humidity"] - current_f["humidity"]) * progress
-            wind_speed = float(current_f.get("wind_speed", 0.0))
-            cloud_coverage = float(current_f.get("cloud_coverage", 50.0))
+            cur_wind = float(current_f.get("wind_speed", 0.0))
+            nxt_wind = float(next_f.get("wind_speed", cur_wind))
+            wind_speed = cur_wind + (nxt_wind - cur_wind) * progress
+
+            cur_clouds = float(current_f.get("cloud_coverage", 50.0))
+            nxt_clouds = float(next_f.get("cloud_coverage", cur_clouds))
+            cloud_coverage = cur_clouds + (nxt_clouds - cur_clouds) * progress
 
             dt_raw = current_f.get("datetime")
             if isinstance(dt_raw, str):
@@ -129,8 +135,10 @@ def run_hybrid_simulation(
             current_action = "open" if should_open else "closed"
             last_action = current_action
 
-            if hourly_action is None:
-                hourly_action = current_action
+            if step == 0:
+                first_step_open = (current_action == "open")
+            if current_action == "open":
+                open_steps += 1
 
             rate_of_change = rate_open if current_action == "open" else rate_closed
             if current_action == "open":
@@ -161,7 +169,10 @@ def run_hybrid_simulation(
 
         history.append({"temp": round(simulated_temp, 2), "humidity": round(simulated_humidity, 2)})
 
-        action_lit = "open" if hourly_action == "open" else "closed"
+        if i == 0:
+            action_lit = "open" if (first_step_open and open_steps >= (STEPS_PER_HOUR // 2)) else "closed"
+        else:
+            action_lit = "open" if (first_step_open or open_steps >= (STEPS_PER_HOUR // 2 + 1)) else "closed"
         if not actions or actions[-1].action != action_lit:
             actions.append(SimulationAction(action=action_lit, hours=1))
         else:
@@ -195,8 +206,13 @@ def run_static_simulation(
             progress = step / STEPS_PER_HOUR
             outside_temp = current_f["temperature"] + (next_f["temperature"] - current_f["temperature"]) * progress
             outside_humidity = current_f["humidity"] + (next_f["humidity"] - current_f["humidity"]) * progress
-            wind_speed = float(current_f.get("wind_speed", 0.0))
-            cloud_coverage = float(current_f.get("cloud_coverage", 50.0))
+            cur_wind = float(current_f.get("wind_speed", 0.0))
+            nxt_wind = float(next_f.get("wind_speed", cur_wind))
+            wind_speed = cur_wind + (nxt_wind - cur_wind) * progress
+
+            cur_clouds = float(current_f.get("cloud_coverage", 50.0))
+            nxt_clouds = float(next_f.get("cloud_coverage", cur_clouds))
+            cloud_coverage = cur_clouds + (nxt_clouds - cur_clouds) * progress
 
             dt_raw = current_f.get("datetime")
             if isinstance(dt_raw, str):
@@ -220,6 +236,11 @@ def run_static_simulation(
                 delta_t, wind_speed, cloud_coverage, elevation, az_sin, az_cos, strategy, solcast_irradiance, False
             ) / STEPS_PER_HOUR
             rate = max(-2.5, min(2.5, rate))
+            if strategy == "open":
+                if delta_t > 0 and rate > delta_t:
+                    rate = delta_t
+                elif delta_t < 0 and rate < delta_t:
+                    rate = delta_t
 
             outside_ah = PsychrometricEngine.absolute_humidity(outside_temp, outside_humidity)
             simulated_ah = PsychrometricEngine.absolute_humidity(simulated_temp, simulated_humidity)
