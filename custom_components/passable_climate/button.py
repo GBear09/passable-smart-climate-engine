@@ -23,6 +23,8 @@ async def async_setup_entry(
     async_add_entities([
         PassableRetrainModelsButton(coordinator, entry),
         PassableRefreshAdvisorButton(coordinator, entry),
+        PassableResetFilterButton(coordinator, entry, "upstairs", "Upstairs"),
+        PassableResetFilterButton(coordinator, entry, "downstairs", "Downstairs"),
     ])
 
 class PassableRetrainModelsButton(CoordinatorEntity[SmartClimateCoordinator], ButtonEntity):
@@ -69,4 +71,34 @@ class PassableRefreshAdvisorButton(CoordinatorEntity[SmartClimateCoordinator], B
     async def async_press(self) -> None:
         """Forces an immediate coordinator refresh."""
         await self.coordinator.async_request_refresh()
+
+
+class PassableResetFilterButton(CoordinatorEntity[SmartClimateCoordinator], ButtonEntity):
+    """Resets cumulative HVAC filter runtime and records replacement timestamp for a zone."""
+
+    def __init__(
+        self,
+        coordinator: SmartClimateCoordinator,
+        entry: ConfigEntry,
+        zone_id: str,
+        zone_name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self.zone_id = zone_id
+        self._attr_unique_id = f"passable_climate_{entry.entry_id}_reset_filter_{zone_id}"
+        self.entity_id = f"button.reset_hvac_filter_{zone_id}"
+        self._attr_name = f"Reset HVAC Filter ({zone_name})"
+        self._attr_icon = "mdi:air-filter"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry.entry_id}_{zone_id}")},
+            name=f"Zone: {zone_name}",
+            manufacturer="Passable Systems",
+            model="Thermal Zone Controller",
+        )
+
+    async def async_press(self) -> None:
+        """Resets filter runtime for this zone."""
+        await self.coordinator.async_reset_filter(self.zone_id)
+
 

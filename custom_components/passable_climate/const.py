@@ -154,3 +154,183 @@ PLOT_METRIC_KEYS = [
     METRIC_HUMIDITY_HEAT,
     METRIC_HUMIDITY_COOL,
 ]
+
+# Configuration Keys - Room Telemetry & Window Contacts
+CONF_ROOMS = "rooms"
+CONF_ROOM_NAME = "name"
+CONF_ROOM_ZONE = "zone"
+CONF_ROOM_TEMP_SENSOR = "temp_sensor"
+CONF_ROOM_WINDOW_SENSORS = "window_sensors"
+CONF_ROOM_INCLUDE_IN_AVG = "include_in_zone_average"
+CONF_ROOM_ENABLE_TELEMETRY = "enable_room_telemetry"
+CONF_UPSTAIRS_WINDOW_SENSORS = "upstairs_window_sensors"
+CONF_DOWNSTAIRS_WINDOW_SENSORS = "downstairs_window_sensors"
+CONF_FILTER_CAPACITY_UPSTAIRS = "filter_capacity_upstairs"
+CONF_FILTER_CAPACITY_DOWNSTAIRS = "filter_capacity_downstairs"
+
+DEFAULT_FILTER_CAPACITY_HOURS = 300.0
+
+DEFAULT_UPSTAIRS_WINDOW_SENSORS = [
+    "binary_sensor.max_s_window_driveway_window_door_is_open_2",
+    "binary_sensor.bathroom_window_window_door_is_open_2",
+    "binary_sensor.master_bed_window_front_right_window_door_is_open_2",
+    "binary_sensor.maggie_s_window_side_yard_window_door_is_open_2",
+]
+
+DEFAULT_DOWNSTAIRS_WINDOW_SENSORS = [
+    "binary_sensor.kitchen_window_sink_window_door_is_open_2",
+    "binary_sensor.dining_room_window_left_window_door_is_open_2",
+    "binary_sensor.playroom_window_front_right_window_door_is_open_3",
+]
+
+DEFAULT_ROOMS: dict[str, dict[str, object]] = {
+    "living_room": {
+        CONF_ROOM_NAME: "Living Room",
+        CONF_ROOM_ZONE: "downstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.living_room_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.dining_room_window_left_window_door_is_open_2"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "dining_room": {
+        CONF_ROOM_NAME: "Dining Room",
+        CONF_ROOM_ZONE: "downstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.downstairs_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.dining_room_window_left_window_door_is_open_2"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "kitchen": {
+        CONF_ROOM_NAME: "Kitchen",
+        CONF_ROOM_ZONE: "downstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.kitchen_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.kitchen_window_sink_window_door_is_open_2"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "playroom": {
+        CONF_ROOM_NAME: "Playroom",
+        CONF_ROOM_ZONE: "downstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.playroom_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.playroom_window_front_right_window_door_is_open_3"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "bathroom": {
+        CONF_ROOM_NAME: "Bathroom",
+        CONF_ROOM_ZONE: "downstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.bathroom_temperature",
+        CONF_ROOM_WINDOW_SENSORS: [],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: False,
+    },
+    "master_bedroom": {
+        CONF_ROOM_NAME: "Master Bedroom",
+        CONF_ROOM_ZONE: "upstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.master_bedroom_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.master_bed_window_front_right_window_door_is_open_2"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "maggies_room": {
+        CONF_ROOM_NAME: "Maggie's Room",
+        CONF_ROOM_ZONE: "upstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.maggies_room_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.maggie_s_window_side_yard_window_door_is_open_2"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "maxs_room": {
+        CONF_ROOM_NAME: "Max's Room",
+        CONF_ROOM_ZONE: "upstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.maxs_room_temperature",
+        CONF_ROOM_WINDOW_SENSORS: ["binary_sensor.max_s_window_driveway_window_door_is_open_2"],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "office": {
+        CONF_ROOM_NAME: "Office",
+        CONF_ROOM_ZONE: "upstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.office_temperature",
+        CONF_ROOM_WINDOW_SENSORS: [],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+    "upstairs": {
+        CONF_ROOM_NAME: "Upstairs Hallway",
+        CONF_ROOM_ZONE: "upstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.upstairs_temperature",
+        CONF_ROOM_WINDOW_SENSORS: [],
+        CONF_ROOM_INCLUDE_IN_AVG: True,
+        CONF_ROOM_ENABLE_TELEMETRY: False,
+    },
+    "madeleines_room": {
+        CONF_ROOM_NAME: "Madeleine's Room",
+        CONF_ROOM_ZONE: "upstairs",
+        CONF_ROOM_TEMP_SENSOR: "sensor.madeleines_room_temperature",
+        CONF_ROOM_WINDOW_SENSORS: [],
+        CONF_ROOM_INCLUDE_IN_AVG: False,
+        CONF_ROOM_ENABLE_TELEMETRY: True,
+    },
+}
+
+# Canonical 8 MLR Rate Sensor Specifications per Zone (16 total across Upstairs & Downstairs)
+ZONE_MLR_RATE_SPECS = [
+    (
+        "heat_loss_gain_windows_closed",
+        "Heat Loss/Gain (Windows Closed)",
+        "°F/h",
+        "mdi:home-thermometer-outline",
+        "temp_closed",
+    ),
+    (
+        "heat_loss_gain_windows_open",
+        "Heat Loss/Gain (Windows Open)",
+        "°F/h",
+        "mdi:window-open-variant",
+        "temp_open",
+    ),
+    (
+        "hvac_heating_rate",
+        "HVAC Heating Performance",
+        "°F/h",
+        "mdi:fire",
+        "temp_heat",
+    ),
+    (
+        "hvac_cooling_rate",
+        "HVAC Cooling Performance",
+        "°F/h",
+        "mdi:snowflake",
+        "temp_cool",
+    ),
+    (
+        "humidity_rate_windows_closed",
+        "Humidity Change (Windows Closed)",
+        "g/m³/h",
+        "mdi:water-percent",
+        "hum_closed",
+    ),
+    (
+        "humidity_rate_windows_open",
+        "Humidity Change (Windows Open)",
+        "g/m³/h",
+        "mdi:water-outline",
+        "hum_open",
+    ),
+    (
+        "humidity_rate_hvac_heating",
+        "Humidity Change (HVAC Heating)",
+        "g/m³/h",
+        "mdi:water-minus",
+        "hum_heat",
+    ),
+    (
+        "humidity_rate_hvac_cooling",
+        "Humidity Change (HVAC Cooling)",
+        "g/m³/h",
+        "mdi:water-check",
+        "hum_cool",
+    ),
+]
+

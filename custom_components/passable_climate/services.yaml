@@ -5,3 +5,20 @@ retrain_models:
 refresh_plan:
   name: Refresh Advisory & Simulation Plan
   description: Forces an immediate re-evaluation and forward micro-step simulation of window recommendations and circulation status.
+
+reset_filter:
+  name: Reset HVAC Filter Life
+  description: Resets cumulative filter runtime hours to 0.0 and records the replacement timestamp for the specified HVAC zone.
+  fields:
+    zone:
+      name: HVAC Zone
+      description: The HVAC zone filter to reset (upstairs, downstairs, or all).
+      required: true
+      default: "downstairs"
+      selector:
+        select:
+          options:
+            - "upstairs"
+            - "downstairs"
+            - "all"
+

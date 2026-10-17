@@ -107,9 +107,25 @@ from .const import (
     DEFAULT_RECOMMENDATION_ENTITY,
     DEFAULT_SOLAR_POWER_ENTITY,
     DEFAULT_SOLCAST_POWER_ENTITY,
+    DEFAULT_UPSTAIRS_WINDOW_SENSORS,
     DEFAULT_WEATHER_ENTITY,
+    DEFAULT_DOWNSTAIRS_WINDOW_SENSORS,
+    DEFAULT_FILTER_CAPACITY_HOURS,
+    DEFAULT_ROOMS,
+    CONF_DOWNSTAIRS_WINDOW_SENSORS,
+    CONF_FILTER_CAPACITY_DOWNSTAIRS,
+    CONF_FILTER_CAPACITY_UPSTAIRS,
+    CONF_ROOM_ENABLE_TELEMETRY,
+    CONF_ROOM_INCLUDE_IN_AVG,
+    CONF_ROOM_NAME,
+    CONF_ROOM_TEMP_SENSOR,
+    CONF_ROOM_WINDOW_SENSORS,
+    CONF_ROOM_ZONE,
+    CONF_ROOMS,
+    CONF_UPSTAIRS_WINDOW_SENSORS,
     DOMAIN,
 )
+from homeassistant.util import slugify
 from .training.influx_client import InfluxClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -349,6 +365,8 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         super().__init__()
         self._config_entry = config_entry
+        self._editing_room_slug: str | None = None
+        self._pending_options: dict[str, Any] = {}
 
     @property
     def config_entry(self) -> config_entries.ConfigEntry:
@@ -358,16 +376,183 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
     def config_entry(self, value: config_entries.ConfigEntry) -> None:
         self._config_entry = value
 
+    def _get_rooms(self) -> dict[str, dict[str, Any]]:
+        """Return a deep copy of configured rooms merged with defaults."""
+        raw_rooms = self.config_entry.options.get(
+            CONF_ROOMS,
+            self.config_entry.data.get(CONF_ROOMS, DEFAULT_ROOMS),
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for slug, r_conf in raw_rooms.items():
+            if isinstance(r_conf, dict):
+                out[slug] = {
+                    CONF_ROOM_NAME: r_conf.get(CONF_ROOM_NAME, slug.replace("_", " ").title()),
+                    CONF_ROOM_ZONE: r_conf.get(CONF_ROOM_ZONE, "downstairs"),
+                    CONF_ROOM_TEMP_SENSOR: r_conf.get(CONF_ROOM_TEMP_SENSOR, ""),
+                    CONF_ROOM_WINDOW_SENSORS: list(r_conf.get(CONF_ROOM_WINDOW_SENSORS, [])),
+                    CONF_ROOM_INCLUDE_IN_AVG: bool(r_conf.get(CONF_ROOM_INCLUDE_IN_AVG, True)),
+                    CONF_ROOM_ENABLE_TELEMETRY: bool(r_conf.get(CONF_ROOM_ENABLE_TELEMETRY, True)),
+                }
+        return out
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Presents categorized tuning menu."""
         return self.async_show_menu(
             step_id="init",
             menu_options=[
+                "manage_rooms",
                 "thermodynamic_settings",
                 "veto_settings",
                 "circulation_settings",
             ],
         )
+
+    async def async_step_manage_rooms(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Manage per-room telemetry sensors, zone window contacts, and filter capacities."""
+        opts = self.config_entry.options
+        rooms = self._get_rooms()
+
+        if user_input is not None:
+            selected_room = user_input.get("selected_room", "__save_zone_windows__")
+            self._pending_options = {
+                CONF_UPSTAIRS_WINDOW_SENSORS: user_input.get(
+                    CONF_UPSTAIRS_WINDOW_SENSORS, DEFAULT_UPSTAIRS_WINDOW_SENSORS
+                ),
+                CONF_DOWNSTAIRS_WINDOW_SENSORS: user_input.get(
+                    CONF_DOWNSTAIRS_WINDOW_SENSORS, DEFAULT_DOWNSTAIRS_WINDOW_SENSORS
+                ),
+                CONF_FILTER_CAPACITY_UPSTAIRS: float(
+                    user_input.get(CONF_FILTER_CAPACITY_UPSTAIRS, DEFAULT_FILTER_CAPACITY_HOURS)
+                ),
+                CONF_FILTER_CAPACITY_DOWNSTAIRS: float(
+                    user_input.get(CONF_FILTER_CAPACITY_DOWNSTAIRS, DEFAULT_FILTER_CAPACITY_HOURS)
+                ),
+            }
+            if selected_room == "__save_zone_windows__":
+                new_options = {**opts, **self._pending_options, CONF_ROOMS: rooms}
+                return self.async_create_entry(title="", data=new_options)
+
+            self._editing_room_slug = str(selected_room)
+            return await self.async_step_edit_room()
+
+        room_options: list[selector.SelectOptionDict] = [
+            selector.SelectOptionDict(
+                value="__save_zone_windows__",
+                label="Save Zone Window Contacts & Filter Settings Only",
+            ),
+            selector.SelectOptionDict(
+                value="__add_new__",
+                label="+ Add New Room / Area",
+            ),
+        ]
+        for r_slug, r_conf in rooms.items():
+            zone_label = str(r_conf.get(CONF_ROOM_ZONE, "downstairs")).capitalize()
+            room_options.append(
+                selector.SelectOptionDict(
+                    value=r_slug,
+                    label=f"Edit: {r_conf.get(CONF_ROOM_NAME, r_slug)} ({zone_label})",
+                )
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Required("selected_room", default="__save_zone_windows__"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=room_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_UPSTAIRS_WINDOW_SENSORS,
+                    default=opts.get(CONF_UPSTAIRS_WINDOW_SENSORS, DEFAULT_UPSTAIRS_WINDOW_SENSORS),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+                ),
+                vol.Required(
+                    CONF_DOWNSTAIRS_WINDOW_SENSORS,
+                    default=opts.get(CONF_DOWNSTAIRS_WINDOW_SENSORS, DEFAULT_DOWNSTAIRS_WINDOW_SENSORS),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+                ),
+                vol.Required(
+                    CONF_FILTER_CAPACITY_UPSTAIRS,
+                    default=opts.get(CONF_FILTER_CAPACITY_UPSTAIRS, DEFAULT_FILTER_CAPACITY_HOURS),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=50.0, max=1000.0, step=10.0, unit_of_measurement="h")
+                ),
+                vol.Required(
+                    CONF_FILTER_CAPACITY_DOWNSTAIRS,
+                    default=opts.get(CONF_FILTER_CAPACITY_DOWNSTAIRS, DEFAULT_FILTER_CAPACITY_HOURS),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=50.0, max=1000.0, step=10.0, unit_of_measurement="h")
+                ),
+            }
+        )
+        return self.async_show_form(step_id="manage_rooms", data_schema=schema)
+
+    async def async_step_edit_room(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Edit an existing room or configure a new room's sensors and zone assignment."""
+        rooms = self._get_rooms()
+        slug = self._editing_room_slug or "__add_new__"
+        is_new = slug == "__add_new__"
+        existing = rooms.get(slug, {})
+
+        if user_input is not None:
+            if not is_new and user_input.get("remove_room", False):
+                rooms.pop(slug, None)
+            else:
+                room_name = str(user_input.get(CONF_ROOM_NAME, "")).strip() or "New Room"
+                target_slug = slugify(room_name) if is_new else slug
+                rooms[target_slug] = {
+                    CONF_ROOM_NAME: room_name,
+                    CONF_ROOM_ZONE: user_input.get(CONF_ROOM_ZONE, "downstairs"),
+                    CONF_ROOM_TEMP_SENSOR: user_input.get(CONF_ROOM_TEMP_SENSOR, ""),
+                    CONF_ROOM_WINDOW_SENSORS: list(user_input.get(CONF_ROOM_WINDOW_SENSORS, [])),
+                    CONF_ROOM_INCLUDE_IN_AVG: bool(user_input.get(CONF_ROOM_INCLUDE_IN_AVG, True)),
+                    CONF_ROOM_ENABLE_TELEMETRY: bool(user_input.get(CONF_ROOM_ENABLE_TELEMETRY, True)),
+                }
+
+            new_options = {
+                **self.config_entry.options,
+                **self._pending_options,
+                CONF_ROOMS: rooms,
+            }
+            return self.async_create_entry(title="", data=new_options)
+
+        default_name = existing.get(CONF_ROOM_NAME, "")
+        default_zone = existing.get(CONF_ROOM_ZONE, "upstairs")
+        default_temp = existing.get(CONF_ROOM_TEMP_SENSOR)
+        default_windows = existing.get(CONF_ROOM_WINDOW_SENSORS, [])
+        default_avg = existing.get(CONF_ROOM_INCLUDE_IN_AVG, True)
+        default_telem = existing.get(CONF_ROOM_ENABLE_TELEMETRY, True)
+
+        fields: dict[Any, Any] = {
+            vol.Required(CONF_ROOM_NAME, default=default_name): str,
+            vol.Required(CONF_ROOM_ZONE, default=default_zone): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="upstairs", label="Upstairs"),
+                        selector.SelectOptionDict(value="downstairs", label="Downstairs"),
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                CONF_ROOM_TEMP_SENSOR,
+                default=default_temp if default_temp else vol.UNDEFINED,
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+            ),
+            vol.Optional(CONF_ROOM_WINDOW_SENSORS, default=default_windows): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+            ),
+            vol.Required(CONF_ROOM_INCLUDE_IN_AVG, default=default_avg): selector.BooleanSelector(),
+            vol.Required(CONF_ROOM_ENABLE_TELEMETRY, default=default_telem): selector.BooleanSelector(),
+        }
+        if not is_new:
+            fields[vol.Optional("remove_room", default=False)] = selector.BooleanSelector()
+
+        return self.async_show_form(step_id="edit_room", data_schema=vol.Schema(fields))
 
     async def async_step_thermodynamic_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Adjusts enthalpy, temperature deadbands, and MLR retraining parameters."""

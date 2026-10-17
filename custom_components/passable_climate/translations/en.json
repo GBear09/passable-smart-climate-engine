@@ -77,9 +77,34 @@
       "init": {
         "title": "Passable Smart Climate Tuning",
         "menu_options": {
+          "manage_rooms": "Rooms, Window Contacts & Filter Life",
           "thermodynamic_settings": "Thermodynamic & Enthalpy Deadbands",
           "veto_settings": "Hazard Safety & Dwell Limits",
           "circulation_settings": "Convective Circulation Guardrails"
+        }
+      },
+      "manage_rooms": {
+        "title": "Rooms, Window Contacts & Filter Life",
+        "description": "Select an existing room to edit, add a new room for passive thermal tracking, or configure zone window contact sensors and HVAC filter life capacities.",
+        "data": {
+          "selected_room": "Room Action / Selection",
+          "upstairs_window_sensors": "Upstairs Window Contact Binary Sensors",
+          "downstairs_window_sensors": "Downstairs Window Contact Binary Sensors",
+          "filter_capacity_upstairs": "Upstairs Filter Life Capacity (Hours)",
+          "filter_capacity_downstairs": "Downstairs Filter Life Capacity (Hours)"
+        }
+      },
+      "edit_room": {
+        "title": "Configure Room Telemetry",
+        "description": "Configure the room's temperature sensor, optional window contact sensors, and whether it contributes to the fault-tolerant zone derivative and generates per-room passive heat loss/gain entities.",
+        "data": {
+          "name": "Room Friendly Name",
+          "zone": "HVAC Zone Assignment",
+          "temp_sensor": "Room Temperature Sensor",
+          "window_sensors": "Room Window Contact Sensors (Optional)",
+          "include_in_zone_average": "Include in Fault-Tolerant Zone Derivative",
+          "enable_room_telemetry": "Generate Per-Room Heat Loss/Gain Entities",
+          "remove_room": "Remove This Room"
         }
       },
       "thermodynamic_settings": {
@@ -158,6 +183,10 @@
     "refresh_plan": {
       "name": "Refresh Advisory & Simulation Plan",
       "description": "Forces an immediate re-evaluation and forward micro-step simulation of window recommendations and circulation status."
+    },
+    "reset_filter": {
+      "name": "Reset HVAC Filter Life",
+      "description": "Resets cumulative filter runtime hours to 0.0 and records the replacement timestamp for the specified HVAC zone."
     }
   }
 }

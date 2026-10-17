@@ -27,6 +27,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_RETRAIN_MODELS = "retrain_models"
 SERVICE_REFRESH_PLAN = "refresh_plan"
+SERVICE_RESET_FILTER = "reset_filter"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -46,6 +47,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     entry.async_on_unload(coordinator.async_unload)
+
+    # Perform an initial telemetry pass before platform registration so initial values are ready
+    await coordinator._async_update_telemetry()
 
     # Register platforms (sensor, binary_sensor, button, number) before first refresh
     # so RestoreNumber entities populate comfort_settings prior to initial evaluation
@@ -106,6 +110,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if isinstance(coord, SmartClimateCoordinator):
                 await coord.async_request_refresh()
 
+    async def handle_reset_filter(call: ServiceCall) -> None:
+        """Service call handler to reset HVAC filter runtime for a zone."""
+        zone = str(call.data.get("zone", "downstairs")).lower().strip()
+        _LOGGER.info("Passable Smart Climate: Reset filter service invoked for zone=%s.", zone)
+        for coord in hass.data.get(DOMAIN, {}).values():
+            if isinstance(coord, SmartClimateCoordinator):
+                await coord.async_reset_filter(zone)
+
     if not hass.services.has_service(DOMAIN, SERVICE_RETRAIN_MODELS):
         hass.services.async_register(
             DOMAIN,
@@ -118,6 +130,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             DOMAIN,
             SERVICE_REFRESH_PLAN,
             handle_refresh_plan,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_RESET_FILTER):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_RESET_FILTER,
+            handle_reset_filter,
         )
 
     return True
@@ -137,6 +156,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.data.get(DOMAIN):
         hass.services.async_remove(DOMAIN, SERVICE_RETRAIN_MODELS)
         hass.services.async_remove(DOMAIN, SERVICE_REFRESH_PLAN)
+        hass.services.async_remove(DOMAIN, SERVICE_RESET_FILTER)
 
     return unload_ok
 

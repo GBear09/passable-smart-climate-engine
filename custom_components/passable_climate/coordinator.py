@@ -112,9 +112,26 @@ from .const import (
     DEFAULT_RECOMMENDATION_ENTITY,
     DEFAULT_SOLAR_POWER_ENTITY,
     DEFAULT_SOLCAST_POWER_ENTITY,
+    DEFAULT_UPSTAIRS_WINDOW_SENSORS,
     DEFAULT_WEATHER_ENTITY,
+    DEFAULT_DOWNSTAIRS_WINDOW_SENSORS,
+    DEFAULT_FILTER_CAPACITY_HOURS,
+    DEFAULT_ROOMS,
+    CONF_DOWNSTAIRS_WINDOW_SENSORS,
+    CONF_FILTER_CAPACITY_DOWNSTAIRS,
+    CONF_FILTER_CAPACITY_UPSTAIRS,
+    CONF_ROOM_ENABLE_TELEMETRY,
+    CONF_ROOM_INCLUDE_IN_AVG,
+    CONF_ROOM_NAME,
+    CONF_ROOM_TEMP_SENSOR,
+    CONF_ROOM_WINDOW_SENSORS,
+    CONF_ROOM_ZONE,
+    CONF_ROOMS,
+    CONF_UPSTAIRS_WINDOW_SENSORS,
     DOMAIN,
+    ZONE_MLR_RATE_SPECS,
 )
+from collections import deque
 from .core.models import RateModel, SimulationAction, ZonePlanResult
 from .core.psychrometrics import PsychrometricEngine, pressure_from_elevation
 from .core.simulator import run_static_simulation
@@ -143,6 +160,35 @@ _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE, "None", ""}
 STALE_INDOOR = datetime.timedelta(hours=24)
 RECOVERY_MIN_ON = datetime.timedelta(minutes=30)
 RECOVERY_EXIT_MARGIN_RH = 3.0
+
+DEFAULT_SEEDED_TELEMETRY: dict[str, dict[str, Any]] = {
+    "downstairs": {
+        "filter_runtime_hours": 179.56,
+        "filter_last_replaced": "2026-08-01 18:01:08",
+        "last_active_ts": "2026-09-18T23:59:14+00:00",
+        "last_hvac_mode": "cooling",
+        "heating_today": 0.0,
+        "cooling_today": 0.0,
+        "fan_today": 0.0,
+        "today_date": "",
+        "cycle_timestamps": [],
+        "active_since_ts": None,
+        "last_action": "idle",
+    },
+    "upstairs": {
+        "filter_runtime_hours": 311.35,
+        "filter_last_replaced": "2026-06-13 20:59:03",
+        "last_active_ts": "2026-10-02T23:40:30+00:00",
+        "last_hvac_mode": "cooling",
+        "heating_today": 0.0,
+        "cooling_today": 0.0,
+        "fan_today": 0.0,
+        "today_date": "",
+        "cycle_timestamps": [],
+        "active_since_ts": None,
+        "last_action": "idle",
+    },
+}
 
 
 class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -177,6 +223,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._models_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.models")
         self._learning_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.learning_data")
         self._latch_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.latch")
+        self._telemetry_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.telemetry")
 
         self._latch = RecommendationLatch()
         self._last_commanded: dict[str, bool] = {}
@@ -217,6 +264,49 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             CONF_COMFORT_DEW_POINT_MAX: DEFAULT_COMFORT_DEW_POINT_MAX,
         }
 
+        # Native MLR Telemetry, Filter Life, Daily Runtime & Health Diagnostics State
+        self._series_buffers: dict[str, deque[tuple[float, float]]] = {}
+        self._last_telemetry_tick_ts: float | None = None
+        self.telemetry_state: dict[str, dict[str, Any]] = {
+            z: dict(DEFAULT_SEEDED_TELEMETRY[z]) for z in ("upstairs", "downstairs")
+        }
+        self.zone_mlr_rates: dict[str, float | None] = {}
+        self.zone_mlr_attrs: dict[str, dict[str, Any]] = {}
+        self.room_mlr_rates: dict[str, float | None] = {}
+        self.room_mlr_attrs: dict[str, dict[str, Any]] = {}
+        self.abs_humidity: dict[str, float | None] = {
+            "outside": None,
+            "upstairs": None,
+            "downstairs": None,
+        }
+        self.open_windows_counts: dict[str, int] = {
+            "upstairs": 0,
+            "downstairs": 0,
+            "total": 0,
+        }
+        self.zone_fault_tolerant_rates: dict[str, float] = {
+            "upstairs": 0.0,
+            "downstairs": 0.0,
+        }
+        self.zone_diagnostics: dict[str, dict[str, Any]] = {
+            "upstairs": {
+                "time_to_temp": 0,
+                "time_to_temp_attrs": {},
+                "health_status": "Optimal",
+                "health_attrs": {},
+                "cycles_per_hour": 0,
+                "is_coasting": False,
+            },
+            "downstairs": {
+                "time_to_temp": 0,
+                "time_to_temp_attrs": {},
+                "health_status": "Optimal",
+                "health_attrs": {},
+                "cycles_per_hour": 0,
+                "is_coasting": False,
+            },
+        }
+
     async def async_set_comfort_param(self, param_key: str, value: float) -> None:
         """Updates a psychrometric comfort envelope parameter and triggers an immediate refresh."""
         self.comfort_settings[param_key] = float(value)
@@ -224,7 +314,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_request_refresh()
 
     async def async_initialize(self) -> None:
-        """Loads cached models, circulation learning data, and latch from Home Assistant storage."""
+        """Loads cached models, circulation learning data, latch, and telemetry from Home Assistant storage."""
         try:
             import dataclasses
 
@@ -268,6 +358,19 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.info("Passable Smart Climate: Restored recommendation latch (%s since %s).", self._latch.state, self._latch.since)
         except Exception as err:
             _LOGGER.warning("Could not restore recommendation latch: %s", err)
+
+        try:
+            cached_telem = await self._telemetry_store.async_load()
+            if cached_telem and isinstance(cached_telem, dict):
+                for z in ("upstairs", "downstairs"):
+                    if isinstance(cached_telem.get(z), dict):
+                        self.telemetry_state[z].update(cached_telem[z])
+                _LOGGER.info("Passable Smart Climate: Restored HVAC filter & runtime telemetry from storage.")
+            else:
+                _LOGGER.info("Passable Smart Climate: Seeding initial HVAC filter & runtime telemetry snapshot.")
+                self._telemetry_store.async_delay_save(lambda: self.telemetry_state, 2)
+        except Exception as err:
+            _LOGGER.warning("Could not restore telemetry store: %s", err)
 
     def _weather_units(self, weather_ent: str) -> tuple[str, str]:
         """Reads temperature and wind speed units for a weather entity."""
@@ -418,16 +521,494 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.warning("Could not set value on helper %s: %s", rec_ent, err)
 
+    def get_configured_rooms(self) -> dict[str, dict[str, Any]]:
+        """Return configured rooms dictionary merged with DEFAULT_ROOMS."""
+        raw = self.options.get(CONF_ROOMS, self.entry_data.get(CONF_ROOMS, DEFAULT_ROOMS))
+        if not isinstance(raw, dict) or not raw:
+            return dict(DEFAULT_ROOMS)
+        return raw
+
+    def get_zone_window_sensors(self, zone_id: str) -> list[str]:
+        """Return all binary_sensor window entities for a given zone."""
+        if zone_id == "upstairs":
+            configured = list(
+                self.options.get(
+                    CONF_UPSTAIRS_WINDOW_SENSORS,
+                    self.entry_data.get(CONF_UPSTAIRS_WINDOW_SENSORS, DEFAULT_UPSTAIRS_WINDOW_SENSORS),
+                )
+            )
+        else:
+            configured = list(
+                self.options.get(
+                    CONF_DOWNSTAIRS_WINDOW_SENSORS,
+                    self.entry_data.get(CONF_DOWNSTAIRS_WINDOW_SENSORS, DEFAULT_DOWNSTAIRS_WINDOW_SENSORS),
+                )
+            )
+        for r_conf in self.get_configured_rooms().values():
+            if isinstance(r_conf, dict) and r_conf.get(CONF_ROOM_ZONE) == zone_id:
+                for w_ent in r_conf.get(CONF_ROOM_WINDOW_SENSORS, []):
+                    if w_ent and w_ent not in configured:
+                        configured.append(w_ent)
+        return configured
+
+    def get_zone_open_windows_count(self, zone_id: str) -> int:
+        """Count open window contact sensors for a zone, falling back to legacy count sensor if needed."""
+        win_sensors = self.get_zone_window_sensors(zone_id)
+        found_any = False
+        open_count = 0
+        for w_ent in win_sensors:
+            st = self.hass.states.get(w_ent)
+            if st is not None and st.state not in _INVALID_STATES:
+                found_any = True
+                if st.state == "on":
+                    open_count += 1
+        if found_any:
+            return open_count
+
+        zones_config = self.entry_data.get(CONF_ZONES, {})
+        win_ent = zones_config.get(zone_id, {}).get(CONF_OPEN_WINDOWS_SENSOR)
+        if win_ent and not win_ent.endswith("_open_windows_count"):
+            raw = self._read_float(win_ent, lo=0.0, hi=100.0)
+            if raw is not None:
+                return int(round(raw))
+        return 0
+
+    @staticmethod
+    def _calc_absolute_humidity(temp_f: float | None, rh: float | None) -> float | None:
+        """Calculate Magnus-formula Absolute Humidity in g/m³ matching legacy YAML template."""
+        if temp_f is None or rh is None or rh <= 0.0:
+            return None
+        try:
+            temp_c = (temp_f - 32.0) * 5.0 / 9.0
+            es = 6.112 * math.exp((17.67 * temp_c) / (temp_c + 243.5))
+            e = (rh / 100.0) * es
+            ah = (e * 2.1674) / (temp_c + 273.15) * 100.0
+            return round(ah, 2)
+        except Exception:
+            return None
+
+    def _record_and_calc_rate(self, series_key: str, val: float | None, now_ts: float) -> float:
+        """Record a sample in a 10-minute rolling buffer and return the derivative in units/hour."""
+        if val is None or not math.isfinite(val):
+            return 0.0
+        buf = self._series_buffers.setdefault(series_key, deque(maxlen=30))
+        buf.append((now_ts, float(val)))
+        cutoff = now_ts - 720.0
+        while len(buf) > 2 and buf[0][0] < cutoff:
+            buf.popleft()
+
+        if len(buf) < 2:
+            return 0.0
+
+        # Select sample closest to 10 minutes (600s) ago, requiring at least 45s elapsed
+        target_ts = now_ts - 600.0
+        ref_ts, ref_val = buf[0]
+        for s_ts, s_val in buf:
+            if s_ts <= target_ts:
+                ref_ts, ref_val = s_ts, s_val
+            else:
+                break
+
+        dt_sec = now_ts - ref_ts
+        if dt_sec < 45.0:
+            return 0.0
+        return round((float(val) - ref_val) / (dt_sec / 3600.0), 3)
+
+    async def async_reset_filter(self, zone: str) -> None:
+        """Reset filter runtime hours and update replacement timestamp for the specified zone."""
+        z_key = zone.lower().strip()
+        zones_to_reset = ["upstairs", "downstairs"] if z_key == "all" else [z_key]
+        now_local_str = dt_util.now().strftime("%Y-%m-%d %H:%M:%S")
+        for zk in zones_to_reset:
+            if zk in self.telemetry_state:
+                self.telemetry_state[zk]["filter_runtime_hours"] = 0.0
+                self.telemetry_state[zk]["filter_last_replaced"] = now_local_str
+                _LOGGER.info("Passable Smart Climate: Reset HVAC filter runtime for %s at %s.", zk, now_local_str)
+        await self._telemetry_store.async_save(self.telemetry_state)
+        await self._async_update_telemetry()
+        self.async_update_listeners()
+
+    async def _async_update_telemetry(self, _now: Any = None) -> None:
+        """60-second lightweight telemetry loop for MLR derivatives, filter life, and diagnostics."""
+        now_local = dt_util.now()
+        now_utc = dt_util.as_utc(now_local)
+        now_ts = now_utc.timestamp()
+
+        dt_hours = 0.0
+        if self._last_telemetry_tick_ts is not None:
+            elapsed = now_ts - self._last_telemetry_tick_ts
+            if 0.0 < elapsed <= 600.0:
+                dt_hours = elapsed / 3600.0
+        self._last_telemetry_tick_ts = now_ts
+
+        today_str = now_local.strftime("%Y-%m-%d")
+        zones_config = self.entry_data.get(CONF_ZONES, {})
+        rooms_config = self.get_configured_rooms()
+
+        # 1. Outdoor Weather & Solar Context for MLR Attributes
+        weather_ent = self.options.get(
+            CONF_WEATHER_ENTITY,
+            self.entry_data.get(CONF_WEATHER_ENTITY, DEFAULT_WEATHER_ENTITY),
+        )
+        t_unit, w_unit = self._weather_units(weather_ent)
+        w_temp_raw = self._get_attr(weather_ent, "temperature")
+        w_temp = self._to_f(float(w_temp_raw), t_unit) if w_temp_raw is not None else 70.0
+        w_rh_raw = self._get_attr(weather_ent, "humidity")
+        w_rh = float(w_rh_raw) if w_rh_raw is not None else 50.0
+        w_wind_raw = self._get_attr(weather_ent, "wind_speed", 0.0)
+        w_wind = self._to_mph(float(w_wind_raw or 0.0), w_unit)
+        cloud_cov_raw = self._get_attr(weather_ent, "cloud_coverage")
+        if cloud_cov_raw is None:
+            cloud_cov_raw = self._read_float("sensor.openweathermap_cloud_coverage", lo=0.0, hi=100.0)
+        cloud_cov = float(cloud_cov_raw) if cloud_cov_raw is not None else 50.0
+
+        sun_elev = float(self._get_attr("sun.sun", "elevation", 0.0) or 0.0)
+        sun_azim = float(self._get_attr("sun.sun", "azimuth", 180.0) or 180.0)
+
+        solar_power_ent = self.options.get(
+            CONF_SOLAR_POWER_ENTITY,
+            self.entry_data.get(CONF_SOLAR_POWER_ENTITY, DEFAULT_SOLAR_POWER_ENTITY),
+        )
+        solcast_power_ent = self.options.get(
+            CONF_SOLCAST_POWER_ENTITY,
+            self.entry_data.get(CONF_SOLCAST_POWER_ENTITY, DEFAULT_SOLCAST_POWER_ENTITY),
+        )
+        actual_solar_w = self._power_w(solar_power_ent) or 0.0
+        solcast_w = self._power_w(solcast_power_ent) or 0.0
+        # Legacy YAML stored solcast_power in kW if sensor is in kW or W; read raw float for exact parity
+        solcast_raw = self._read_float(solcast_power_ent, lo=0.0, hi=1e6) or (solcast_w / 1000.0)
+
+        out_ah = self._calc_absolute_humidity(w_temp, w_rh)
+        self.abs_humidity["outside"] = out_ah
+
+        # 2. Open Window Counts
+        up_win = self.get_zone_open_windows_count("upstairs")
+        down_win = self.get_zone_open_windows_count("downstairs")
+        total_win = up_win + down_win
+        self.open_windows_counts = {
+            "upstairs": up_win,
+            "downstairs": down_win,
+            "total": total_win,
+        }
+
+        # 3. Per-Room Temperatures & 10-Minute Rolling Derivatives
+        room_temps: dict[str, float | None] = {}
+        room_rates: dict[str, float] = {}
+        room_open_win: dict[str, int] = {}
+
+        for r_slug, r_conf in rooms_config.items():
+            if not isinstance(r_conf, dict):
+                continue
+            r_temp_ent = r_conf.get(CONF_ROOM_TEMP_SENSOR)
+            r_unit = self._get_attr(r_temp_ent, "unit_of_measurement", "°F")
+            r_raw = self._read_float(r_temp_ent, lo=-10.0, hi=120.0)
+            r_temp = self._to_f(r_raw, r_unit) if r_raw is not None else None
+            room_temps[r_slug] = r_temp
+            room_rates[r_slug] = self._record_and_calc_rate(f"room_{r_slug}", r_temp, now_ts)
+
+            r_win_list = r_conf.get(CONF_ROOM_WINDOW_SENSORS, [])
+            if r_win_list:
+                r_open = sum(
+                    1
+                    for w_e in r_win_list
+                    if (self.hass.states.get(w_e) and self.hass.states.get(w_e).state == "on")
+                )
+            else:
+                r_zone = str(r_conf.get(CONF_ROOM_ZONE, "downstairs"))
+                r_open = up_win if r_zone == "upstairs" else down_win
+            room_open_win[r_slug] = r_open
+
+        # 4. Per-Zone Runtime, Coasting, Fault-Tolerant Rates & Diagnostics
+        zone_actions: dict[str, str] = {}
+        zone_in_temps: dict[str, float | None] = {}
+        zone_ah_rates: dict[str, float] = {}
+
+        for z_key in ("upstairs", "downstairs"):
+            z_conf = zones_config.get(z_key, {})
+            climate_ent = z_conf.get(CONF_CLIMATE_ENTITY, f"climate.{z_key}_hk")
+            temp_ent = z_conf.get(CONF_TEMP_SENSOR, f"sensor.{z_key}_average_temperature_smoothed")
+            hum_ent = z_conf.get(CONF_HUMIDITY_SENSOR, f"sensor.{z_key}_average_humidity_smoothed")
+
+            t_unit_z = self._get_attr(temp_ent, "unit_of_measurement", "°F")
+            in_temp_raw = self._read_float(temp_ent, lo=-10.0, hi=120.0)
+            in_temp = self._to_f(in_temp_raw, t_unit_z) if in_temp_raw is not None else None
+            in_rh = self._read_float(hum_ent, lo=1.0, hi=100.0)
+            zone_in_temps[z_key] = in_temp
+
+            z_ah = self._calc_absolute_humidity(in_temp, in_rh)
+            self.abs_humidity[z_key] = z_ah
+            zone_ah_rates[z_key] = self._record_and_calc_rate(f"zone_ah_{z_key}", z_ah, now_ts)
+            fallback_z_rate = self._record_and_calc_rate(f"zone_temp_{z_key}", in_temp, now_ts)
+
+            # Fault-Tolerant Zone Temperature Rate across active room sensors
+            candidate_rates = [
+                room_rates[slug]
+                for slug, rc in rooms_config.items()
+                if isinstance(rc, dict)
+                and rc.get(CONF_ROOM_ZONE) == z_key
+                and rc.get(CONF_ROOM_INCLUDE_IN_AVG, True)
+                and room_temps.get(slug) is not None
+                and abs(room_rates.get(slug, 0.0)) < 15.0
+            ]
+            non_zero_rates = [r for r in candidate_rates if abs(r) > 0.001]
+            if non_zero_rates:
+                ft_rate = round(sum(non_zero_rates) / len(non_zero_rates), 2)
+            elif candidate_rates:
+                ft_rate = round(sum(candidate_rates) / len(candidate_rates), 2)
+            else:
+                ft_rate = round(fallback_z_rate, 2)
+            self.zone_fault_tolerant_rates[z_key] = ft_rate
+
+            # HVAC Action & Runtime Accumulation
+            c_st_obj = self.hass.states.get(climate_ent)
+            c_attrs = c_st_obj.attributes if c_st_obj else {}
+            hvac_action = str(c_attrs.get("hvac_action", "idle") or "idle").lower()
+            fan_mode = str(c_attrs.get("fan_mode", "auto") or "auto").lower()
+            zone_actions[z_key] = hvac_action
+
+            zt = self.telemetry_state[z_key]
+            if zt.get("today_date") != today_str:
+                if zt.get("today_date"):
+                    zt["heating_today"] = 0.0
+                    zt["cooling_today"] = 0.0
+                    zt["fan_today"] = 0.0
+                zt["today_date"] = today_str
+
+            prev_action = str(zt.get("last_action", "idle"))
+            is_active_now = hvac_action in ("heating", "cooling")
+            was_active = prev_action in ("heating", "cooling")
+
+            if is_active_now and not was_active:
+                zt["active_since_ts"] = now_utc.isoformat()
+                cycles = list(zt.get("cycle_timestamps", []))
+                cycles.append(now_utc.isoformat())
+                zt["cycle_timestamps"] = cycles
+            elif not is_active_now:
+                zt["active_since_ts"] = None
+
+            if is_active_now or was_active:
+                zt["last_active_ts"] = now_utc.isoformat()
+            if is_active_now:
+                zt["last_hvac_mode"] = hvac_action
+            zt["last_action"] = hvac_action
+
+            # Prune cycle_timestamps to rolling 60-minute window
+            valid_cycles: list[str] = []
+            for ts_s in zt.get("cycle_timestamps", []):
+                dt_c = dt_util.parse_datetime(str(ts_s))
+                if dt_c and (now_utc - dt_c).total_seconds() <= 3600.0:
+                    valid_cycles.append(ts_s)
+            zt["cycle_timestamps"] = valid_cycles
+
+            if dt_hours > 0.0:
+                if hvac_action == "heating":
+                    zt["heating_today"] = round(float(zt.get("heating_today", 0.0)) + dt_hours, 4)
+                    zt["filter_runtime_hours"] = round(float(zt.get("filter_runtime_hours", 0.0)) + dt_hours, 4)
+                elif hvac_action == "cooling":
+                    zt["cooling_today"] = round(float(zt.get("cooling_today", 0.0)) + dt_hours, 4)
+                    zt["filter_runtime_hours"] = round(float(zt.get("filter_runtime_hours", 0.0)) + dt_hours, 4)
+                elif hvac_action == "fan" or fan_mode == "on":
+                    zt["fan_today"] = round(float(zt.get("fan_today", 0.0)) + dt_hours, 4)
+                    zt["filter_runtime_hours"] = round(float(zt.get("filter_runtime_hours", 0.0)) + dt_hours, 4)
+
+            # Coasting evaluation (90-minute post-HVAC thermal inertia gate with rebound override)
+            last_act_dt = dt_util.parse_datetime(str(zt.get("last_active_ts", "")))
+            last_mode = str(zt.get("last_hvac_mode", "idle"))
+            is_coasting = False
+            if not is_active_now and last_act_dt is not None:
+                since_sec = (now_utc - last_act_dt).total_seconds()
+                if 0.0 <= since_sec < 5400.0:
+                    if last_mode == "cooling" and ft_rate >= 0.0:
+                        is_coasting = False
+                    elif last_mode == "heating" and ft_rate <= 0.0:
+                        is_coasting = False
+                    else:
+                        is_coasting = True
+
+            # Physics-Based Time-to-Target & Health Diagnostics
+            target_sp = c_attrs.get("temperature")
+            if target_sp is None:
+                target_sp = c_attrs.get("target_temp_low") if hvac_action == "heating" else c_attrs.get("target_temp_high")
+            target_f = float(target_sp) if target_sp is not None else None
+
+            active_run_mins = 0.0
+            if zt.get("active_since_ts"):
+                act_dt = dt_util.parse_datetime(str(zt["active_since_ts"]))
+                if act_dt:
+                    active_run_mins = max(0.0, (now_utc - act_dt).total_seconds() / 60.0)
+
+            model_key = f"{z_key}_temp_profile_hvac_heat" if hvac_action == "heating" else f"{z_key}_temp_profile_hvac_cool"
+            rate_model = self.models.get(model_key)
+            pred_rate = 0.0
+            if rate_model and in_temp is not None:
+                delta_t = w_temp - in_temp
+                pred_rate = float(rate_model.slope * delta_t + rate_model.intercept)
+            if active_run_mins >= 10.0 and abs(ft_rate) > 0.1:
+                pred_rate = 0.5 * pred_rate + 0.5 * ft_rate if pred_rate != 0.0 else ft_rate
+
+            time_to_temp = 0
+            if is_active_now and in_temp is not None and target_f is not None:
+                if hvac_action == "heating" and target_f > in_temp:
+                    eff_r = max(0.4, pred_rate if pred_rate > 0.2 else 1.5)
+                    time_to_temp = max(1, min(240, int(round(((target_f - in_temp) / eff_r) * 60.0))))
+                elif hvac_action == "cooling" and in_temp > target_f:
+                    eff_r = max(0.4, abs(pred_rate) if pred_rate < -0.2 else 1.5)
+                    time_to_temp = max(1, min(240, int(round(((in_temp - target_f) / eff_r) * 60.0))))
+
+            cap_h = self._read_float(f"input_number.hvac_filter_life_{z_key}", lo=10.0, hi=2000.0)
+            if cap_h is None:
+                cap_key = CONF_FILTER_CAPACITY_UPSTAIRS if z_key == "upstairs" else CONF_FILTER_CAPACITY_DOWNSTAIRS
+                cap_h = float(self.options.get(cap_key, DEFAULT_FILTER_CAPACITY_HOURS))
+            rem_h = round(cap_h - float(zt.get("filter_runtime_hours", 0.0)), 1)
+
+            cph = len(valid_cycles)
+            if cph > 4:
+                health_status = "Short Cycling"
+            elif is_active_now and active_run_mins >= 20.0 and (
+                (hvac_action == "cooling" and ft_rate > -0.1)
+                or (hvac_action == "heating" and ft_rate < 0.1)
+            ):
+                health_status = "Thermal Stall"
+            elif rem_h <= 0.0:
+                health_status = "Filter Overdue"
+            else:
+                health_status = "Optimal"
+
+            self.zone_diagnostics[z_key] = {
+                "time_to_temp": time_to_temp,
+                "time_to_temp_attrs": {
+                    "formatted": f"~{time_to_temp}m" if time_to_temp > 0 else "Idle",
+                    "hvac_action": hvac_action,
+                    "current_temperature": in_temp,
+                    "target_temperature": target_f,
+                    "predicted_rate_f_hr": round(pred_rate, 2),
+                    "observed_rate_f_hr": ft_rate,
+                    "active_runtime_minutes": round(active_run_mins, 1),
+                },
+                "health_status": health_status,
+                "health_attrs": {
+                    "cycles_per_hour": cph,
+                    "active_runtime_minutes": round(active_run_mins, 1),
+                    "observed_rate_f_hr": ft_rate,
+                    "filter_life_remaining_hours": rem_h,
+                    "is_coasting": is_coasting,
+                },
+                "cycles_per_hour": cph,
+                "is_coasting": is_coasting,
+                "filter_capacity_hours": cap_h,
+                "filter_remaining_hours": rem_h,
+            }
+
+        # 5. Populate the 16 Canonical Zone MLR Rate Sensors & Per-Room Passive Rate Sensors
+        both_idle = (
+            zone_actions.get("upstairs") not in ("heating", "cooling")
+            and zone_actions.get("downstairs") not in ("heating", "cooling")
+        )
+
+        for z_key in ("upstairs", "downstairs"):
+            ft_rate = self.zone_fault_tolerant_rates[z_key]
+            ah_rate = zone_ah_rates.get(z_key, 0.0)
+            in_temp = zone_in_temps.get(z_key)
+            in_ah = self.abs_humidity.get(z_key)
+            z_open = up_win if z_key == "upstairs" else down_win
+            z_action = zone_actions.get(z_key, "idle")
+            z_coasting = bool(self.zone_diagnostics[z_key].get("is_coasting", False))
+
+            common_attrs = {
+                "outside_temperature": round(w_temp, 2) if w_temp is not None else None,
+                "inside_temperature": round(in_temp, 2) if in_temp is not None else None,
+                "outside_ah": out_ah,
+                "inside_ah": in_ah,
+                "wind_speed": round(w_wind, 2),
+                "cloud_coverage": round(cloud_cov, 1),
+                "sun_elevation": round(sun_elev, 2),
+                "sun_azimuth": round(sun_azim, 2),
+                "solcast_power": round(float(solcast_raw), 3),
+                "actual_solar_power": round(actual_solar_w, 1),
+            }
+
+            for suffix, _friendly, _unit, _icon, mode_type in ZONE_MLR_RATE_SPECS:
+                full_key = f"{z_key}_{suffix}"
+                self.zone_mlr_attrs[full_key] = dict(common_attrs)
+                val_out: float | None = None
+                if mode_type == "temp_closed":
+                    if both_idle and not z_coasting and total_win == 0 and abs(ft_rate) < 10.0:
+                        val_out = round(ft_rate, 2)
+                elif mode_type == "temp_open":
+                    if both_idle and not z_coasting and z_open > 0 and abs(ft_rate) < 10.0:
+                        val_out = round(ft_rate, 2)
+                elif mode_type == "temp_heat":
+                    if z_action == "heating" and total_win == 0 and abs(ft_rate) < 15.0:
+                        val_out = round(ft_rate, 2)
+                elif mode_type == "temp_cool":
+                    if z_action == "cooling" and total_win == 0 and abs(ft_rate) < 15.0:
+                        val_out = round(ft_rate, 2)
+                elif mode_type == "hum_closed":
+                    if both_idle and not z_coasting and total_win == 0 and abs(ah_rate) < 5.0:
+                        val_out = round(ah_rate, 3)
+                elif mode_type == "hum_open":
+                    if both_idle and not z_coasting and z_open > 0 and abs(ah_rate) < 5.0:
+                        val_out = round(ah_rate, 3)
+                elif mode_type == "hum_heat":
+                    if z_action == "heating" and total_win == 0 and abs(ah_rate) < 5.0:
+                        val_out = round(ah_rate, 3)
+                elif mode_type == "hum_cool":
+                    if z_action == "cooling" and total_win == 0 and abs(ah_rate) < 5.0:
+                        val_out = round(ah_rate, 3)
+                self.zone_mlr_rates[full_key] = val_out
+
+        # Per-Room Passive Heat Loss/Gain Rates
+        for r_slug, r_conf in rooms_config.items():
+            if not isinstance(r_conf, dict) or not r_conf.get(CONF_ROOM_ENABLE_TELEMETRY, True):
+                continue
+            r_zone = str(r_conf.get(CONF_ROOM_ZONE, "downstairs"))
+            r_temp = room_temps.get(r_slug)
+            r_rate = room_rates.get(r_slug, 0.0)
+            r_open = room_open_win.get(r_slug, 0)
+            r_coasting = bool(self.zone_diagnostics.get(r_zone, {}).get("is_coasting", False))
+
+            r_attrs = {
+                "outside_temperature": round(w_temp, 2) if w_temp is not None else None,
+                "inside_temperature": round(r_temp, 2) if r_temp is not None else None,
+                "wind_speed": round(w_wind, 2),
+                "cloud_coverage": round(cloud_cov, 1),
+                "sun_elevation": round(sun_elev, 2),
+                "sun_azimuth": round(sun_azim, 2),
+                "solcast_power": round(float(solcast_raw), 3),
+                "actual_solar_power": round(actual_solar_w, 1),
+            }
+            closed_key = f"{r_slug}_heat_loss_gain_windows_closed"
+            open_key = f"{r_slug}_heat_loss_gain_windows_open"
+            self.room_mlr_attrs[closed_key] = dict(r_attrs)
+            self.room_mlr_attrs[open_key] = dict(r_attrs)
+
+            if both_idle and not r_coasting and total_win == 0 and r_temp is not None and abs(r_rate) < 10.0:
+                self.room_mlr_rates[closed_key] = round(r_rate, 2)
+            else:
+                self.room_mlr_rates[closed_key] = None
+
+            if both_idle and not r_coasting and r_open > 0 and r_temp is not None and abs(r_rate) < 10.0:
+                self.room_mlr_rates[open_key] = round(r_rate, 2)
+            else:
+                self.room_mlr_rates[open_key] = None
+
+        self._telemetry_store.async_delay_save(lambda: self.telemetry_state, 30)
+        if _now is not None:
+            self.async_update_listeners()
+
     def async_setup_listeners(self) -> None:
-        """Sets up reactive state listeners on window contact sensors, occupancy, and helpers."""
-        from homeassistant.helpers.event import async_track_state_change_event
+        """Sets up reactive state listeners on window contact sensors, occupancy, helpers, and 60s telemetry tick."""
+        from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 
         entities_to_track: list[str] = []
         zones_config = self.entry_data.get(CONF_ZONES, {})
-        for z_conf in zones_config.values():
+        for z_key, z_conf in zones_config.items():
             win_ent = z_conf.get(CONF_OPEN_WINDOWS_SENSOR)
             if win_ent and win_ent not in entities_to_track:
                 entities_to_track.append(win_ent)
+            for bin_win in self.get_zone_window_sensors(z_key):
+                if bin_win and bin_win not in entities_to_track:
+                    entities_to_track.append(bin_win)
 
         # Track presence and home mode for instantaneous updates upon arriving home
         home_mode_ent = self.options.get(
@@ -461,11 +1042,19 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Reactive trigger from tracked entity %s; refreshing climate plan.",
                     event.data.get("entity_id"),
                 )
+                await self._async_update_telemetry()
                 await self.async_request_refresh()
 
             self._unsub_track = async_track_state_change_event(
                 self.hass, entities_to_track, _handle_tracked_state_change
             )
+
+        # 60-second lightweight telemetry tick for rolling derivatives, filter runtime, and diagnostics
+        self._unsub_telemetry = async_track_time_interval(
+            self.hass,
+            self._async_update_telemetry,
+            datetime.timedelta(seconds=60),
+        )
 
         # Reactive listener for manual circulation toggle switches
         circ_bools: list[str] = []
@@ -539,6 +1128,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if hasattr(self, "_unsub_track") and self._unsub_track:
             self._unsub_track()
             self._unsub_track = None
+        if hasattr(self, "_unsub_telemetry") and self._unsub_telemetry:
+            self._unsub_telemetry()
+            self._unsub_telemetry = None
         if hasattr(self, "_unsub_circ") and self._unsub_circ:
             self._unsub_circ()
             self._unsub_circ = None
@@ -594,6 +1186,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Runs the complete environmental arbitration, forward simulation, and circulation manager with fail-safe error handling."""
         try:
+            await self._async_update_telemetry()
             return await self._async_evaluate()
         except Exception as err:
             _LOGGER.exception("Evaluation failed; publishing fail-safe 'Close Windows'")
@@ -909,6 +1502,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 in_temp = None
             in_hum = self._read_float(hum_ent, lo=1.0, hi=100.0, max_age=STALE_INDOOR)
             win_raw = self._read_float(win_ent, lo=0.0, hi=1000.0)
+            if win_raw is None and z_key in self.open_windows_counts:
+                win_raw = float(self.open_windows_counts[z_key])
 
             # Fail-safe: unknown contact state is treated as OPEN for every interlock
             is_open = True if win_raw is None else (win_raw > 0)
