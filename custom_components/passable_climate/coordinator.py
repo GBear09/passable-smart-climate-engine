@@ -675,8 +675,6 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         actual_solar_w = self._power_w(solar_power_ent) or 0.0
         solcast_w = self._power_w(solcast_power_ent) or 0.0
-        # Legacy YAML stored solcast_power in kW if sensor is in kW or W; read raw float for exact parity
-        solcast_raw = self._read_float(solcast_power_ent, lo=0.0, hi=1e6) or (solcast_w / 1000.0)
 
         out_ah = self._calc_absolute_humidity(w_temp, w_rh)
         self.abs_humidity["outside"] = out_ah
@@ -923,12 +921,12 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cloud_coverage": round(cloud_cov, 1),
                 "sun_elevation": round(sun_elev, 2),
                 "sun_azimuth": round(sun_azim, 2),
-                "solcast_power": round(float(solcast_raw), 3),
+                "solcast_power": round(solcast_w, 1),
                 "actual_solar_power": round(actual_solar_w, 1),
             }
 
-            for suffix, _friendly, _unit, _icon, mode_type in ZONE_MLR_RATE_SPECS:
-                full_key = f"{z_key}_{suffix}"
+            for obj_id_tpl, _friendly, _unit, _icon, mode_type in ZONE_MLR_RATE_SPECS:
+                full_key = obj_id_tpl.format(zone=z_key)
                 self.zone_mlr_attrs[full_key] = dict(common_attrs)
                 val_out: float | None = None
                 if mode_type == "temp_closed":
@@ -974,7 +972,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cloud_coverage": round(cloud_cov, 1),
                 "sun_elevation": round(sun_elev, 2),
                 "sun_azimuth": round(sun_azim, 2),
-                "solcast_power": round(float(solcast_raw), 3),
+                "solcast_power": round(solcast_w, 1),
                 "actual_solar_power": round(actual_solar_w, 1),
             }
             closed_key = f"{r_slug}_heat_loss_gain_windows_closed"

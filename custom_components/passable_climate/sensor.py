@@ -55,15 +55,32 @@ METRIC_FRIENDLY_NAMES = {
 }
 
 
+_DEPRECATED_V110_ENTITY_IDS = (
+    "sensor.upstairs_hvac_heating_rate",
+    "sensor.upstairs_hvac_cooling_rate",
+    "sensor.downstairs_hvac_heating_rate",
+    "sensor.downstairs_hvac_cooling_rate",
+    "sensor.upstairs_humidity_rate_windows_closed",
+    "sensor.upstairs_humidity_rate_windows_open",
+    "sensor.upstairs_humidity_rate_hvac_heating",
+    "sensor.upstairs_humidity_rate_hvac_cooling",
+    "sensor.downstairs_humidity_rate_windows_closed",
+    "sensor.downstairs_humidity_rate_windows_open",
+    "sensor.downstairs_humidity_rate_hvac_heating",
+    "sensor.downstairs_humidity_rate_hvac_cooling",
+)
+
+
 def _claim_legacy_entity_id(hass: HomeAssistant, desired_entity_id: str) -> None:
     """Release orphaned YAML registry entries so passable_climate claims the exact entity_id."""
     try:
         ent_reg = er.async_get(hass)
+        for dep_id in _DEPRECATED_V110_ENTITY_IDS:
+            if ent_reg.async_get(dep_id) is not None:
+                ent_reg.async_remove(dep_id)
         existing = ent_reg.async_get(desired_entity_id)
         if existing is not None and existing.platform != DOMAIN:
-            st = hass.states.get(desired_entity_id)
-            if st is None or st.state in ("unavailable", "unknown"):
-                ent_reg.async_remove(desired_entity_id)
+            ent_reg.async_remove(desired_entity_id)
     except Exception:
         pass
 
@@ -468,7 +485,7 @@ class PassableZoneMLRRateSensor(CoordinatorEntity[SmartClimateCoordinator], Sens
     ) -> None:
         super().__init__(coordinator)
         self.zone_id = zone_id
-        self.full_key = f"{zone_id}_{suffix}"
+        self.full_key = suffix.format(zone=zone_id)
         self._attr_unique_id = f"passable_climate_{entry.entry_id}_mlr_{self.full_key}"
         self.entity_id = f"sensor.{self.full_key}"
         self._attr_name = f"{zone_name} {friendly_suffix}"
