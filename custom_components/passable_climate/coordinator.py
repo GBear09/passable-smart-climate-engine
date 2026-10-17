@@ -853,11 +853,14 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     eff_r = max(0.4, abs(pred_rate) if pred_rate < -0.2 else 1.5)
                     time_to_temp = max(1, min(240, int(round(((in_temp - target_f) / eff_r) * 60.0))))
 
-            cap_h = self._read_float(f"input_number.hvac_filter_life_{z_key}", lo=10.0, hi=2000.0)
-            if cap_h is None:
-                cap_key = CONF_FILTER_CAPACITY_UPSTAIRS if z_key == "upstairs" else CONF_FILTER_CAPACITY_DOWNSTAIRS
-                cap_h = float(self.options.get(cap_key, DEFAULT_FILTER_CAPACITY_HOURS))
-            rem_h = round(cap_h - float(zt.get("filter_runtime_hours", 0.0)), 1)
+            cap_key = CONF_FILTER_CAPACITY_UPSTAIRS if z_key == "upstairs" else CONF_FILTER_CAPACITY_DOWNSTAIRS
+            cap_h = (
+                self.comfort_settings.get(cap_key)
+                or self._read_float(f"number.hvac_filter_life_{z_key}", lo=10.0, hi=2000.0)
+                or self._read_float(f"input_number.hvac_filter_life_{z_key}", lo=10.0, hi=2000.0)
+                or float(self.options.get(cap_key, DEFAULT_FILTER_CAPACITY_HOURS))
+            )
+            rem_h = round(float(cap_h) - float(zt.get("filter_runtime_hours", 0.0)), 1)
 
             cph = len(valid_cycles)
             if cph > 4:

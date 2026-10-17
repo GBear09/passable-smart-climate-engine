@@ -28,11 +28,15 @@ from .const import (
     CONF_COMFORT_HUMIDITY_MIN,
     CONF_COMFORT_TEMP_MAX,
     CONF_COMFORT_TEMP_MIN,
+    CONF_FILTER_CAPACITY_DOWNSTAIRS,
+    CONF_FILTER_CAPACITY_UPSTAIRS,
+    CONF_ZONES,
     DEFAULT_COMFORT_DEW_POINT_MAX,
     DEFAULT_COMFORT_HUMIDITY_MAX,
     DEFAULT_COMFORT_HUMIDITY_MIN,
     DEFAULT_COMFORT_TEMP_MAX,
     DEFAULT_COMFORT_TEMP_MIN,
+    DEFAULT_FILTER_CAPACITY_HOURS,
     DOMAIN,
 )
 from .coordinator import SmartClimateCoordinator
@@ -120,10 +124,19 @@ async def async_setup_entry(
     """Set up Passable Climate number entities from config entry."""
     coordinator: SmartClimateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = [
+    entities: list[NumberEntity] = [
         PassableComfortNumberEntity(coordinator, entry, desc)
         for desc in COMFORT_NUMBER_DESCRIPTIONS
     ]
+
+    zones = entry.data.get(CONF_ZONES, {})
+    for zone_id in ("upstairs", "downstairs"):
+        zone_conf = zones.get(zone_id, {})
+        zone_name = zone_conf.get("name", zone_id.capitalize())
+        entities.append(
+            PassableFilterCapacityNumberEntity(coordinator, entry, zone_id, zone_name)
+        )
+
     async_add_entities(entities)
 
 
@@ -181,3 +194,66 @@ class PassableComfortNumberEntity(CoordinatorEntity[SmartClimateCoordinator], Re
         self.coordinator.comfort_settings[self.entity_description.key] = float(value)
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
+
+
+class PassableFilterCapacityNumberEntity(CoordinatorEntity[SmartClimateCoordinator], RestoreNumber):
+    """Interactive Max Recommended Filter Lifespan (hours) per HVAC zone."""
+
+    _attr_icon = "mdi:air-filter"
+    _attr_native_min_value = 50.0
+    _attr_native_max_value = 1000.0
+    _attr_native_step = 25.0
+    _attr_native_unit_of_measurement = "h"
+    _attr_mode = NumberMode.BOX
+
+    def __init__(
+        self,
+        coordinator: SmartClimateCoordinator,
+        entry: ConfigEntry,
+        zone_id: str,
+        zone_name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self.zone_id = zone_id
+        self.cap_key = (
+            CONF_FILTER_CAPACITY_UPSTAIRS
+            if zone_id == "upstairs"
+            else CONF_FILTER_CAPACITY_DOWNSTAIRS
+        )
+        self._attr_unique_id = f"passable_climate_{entry.entry_id}_filter_life_{zone_id}"
+        self.entity_id = f"number.hvac_filter_life_{zone_id}"
+        self._attr_name = f"HVAC Filter Max Life ({zone_name})"
+        self._current_value = float(
+            coordinator.options.get(self.cap_key, DEFAULT_FILTER_CAPACITY_HOURS)
+        )
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry.entry_id}_{zone_id}")},
+            name=f"Zone: {zone_name}",
+            manufacturer="Passable Systems",
+            model="Thermal Zone Controller",
+        )
+
+    @property
+    def native_value(self) -> float:
+        return float(
+            self.coordinator.comfort_settings.get(self.cap_key, self._current_value)
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_number_data = await self.async_get_last_number_data()
+        if last_number_data is not None and last_number_data.native_value is not None:
+            val = float(last_number_data.native_value)
+            self._current_value = val
+            self.coordinator.comfort_settings[self.cap_key] = val
+        else:
+            self.coordinator.comfort_settings[self.cap_key] = self._current_value
+        await self.coordinator._async_update_telemetry()
+        self.coordinator.async_update_listeners()
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._current_value = float(value)
+        self.coordinator.comfort_settings[self.cap_key] = float(value)
+        await self.coordinator._async_update_telemetry()
+        self.coordinator.async_update_listeners()
+        self.async_write_ha_state()
