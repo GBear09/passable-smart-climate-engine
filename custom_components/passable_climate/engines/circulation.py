@@ -211,6 +211,12 @@ class CirculationManager:
             if minutes_running >= max_runtime_minutes:
                 return "turn_off", lockout_hours
 
+            # 1b. Source temperature cannot physically satisfy target setpoint
+            if (active_mode == "heat" and source_temp <= target_heat) or (
+                active_mode == "cool" and source_temp >= target_cool
+            ):
+                return "turn_off", 2.0
+
             # 2. Anti-short-cycle
             if minutes_running < min_runtime_minutes:
                 return "hold", 0.0
@@ -281,11 +287,21 @@ class CirculationManager:
             source_cooler = source_temp < area_temp
             source_warmer = source_temp > area_temp
 
-            if needs_cooling and source_cooler and (area_temp - source_temp) >= delta_threshold:
+            if (
+                needs_cooling
+                and source_cooler
+                and source_temp < target_cool
+                and (area_temp - source_temp) >= delta_threshold
+            ):
                 if self.predict_circulation_success(z_key, True, out_temp, area_temp, source_temp):
                     return "turn_on", 0.0
 
-            elif needs_heating and source_warmer and (source_temp - area_temp) >= delta_threshold:
+            elif (
+                needs_heating
+                and source_warmer
+                and source_temp > target_heat
+                and (source_temp - area_temp) >= delta_threshold
+            ):
                 if self.predict_circulation_success(z_key, False, out_temp, area_temp, source_temp):
                     return "turn_on", 0.0
 
