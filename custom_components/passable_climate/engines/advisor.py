@@ -235,11 +235,12 @@ def is_outside_air_favorable(
 
     # 4. Heating Regimes (Free Heating, Fall Transition, Coldsnap Prep)
     elif hvac_mode == "heat" or seasonal_mode in ["fall_transition", "coldsnap_prep"]:
-        if outside_temp <= (inside_temp + temp_margin) and not macro_override:
+        eff_temp_margin = 0.0 if macro_override else temp_margin
+        heat_enthalpy_margin = 0.0 if macro_override else (0.1 if is_currently_open else 0.5)
+        if outside_temp <= (inside_temp + eff_temp_margin):
             return False, f"Outdoor temperature ({outside_temp:.1f}°F) is not warm enough."
 
-        heat_enthalpy_margin = 0.1 if is_currently_open else 0.5
-        if (h_out - h_in) < heat_enthalpy_margin and not macro_override:
+        if (h_out - h_in) < heat_enthalpy_margin:
             return False, "Insufficient thermal energy in outdoor air."
 
         if inside_temp >= safe_max_temp:
@@ -887,6 +888,7 @@ def evaluate_zone_plan(
                     lat=lat,
                     lon=lon,
                     solcast_forecast=solcast_forecast,
+                    model_temp_closed=models.get("temp_closed"),
                 )
                 if active_history and active_history[-1]["temp"] <= active_cool_sp:
                     return ZonePlanResult(
@@ -930,6 +932,7 @@ def evaluate_zone_plan(
                 lat=lat,
                 lon=lon,
                 solcast_forecast=solcast_forecast,
+                model_temp_closed=models.get("temp_closed"),
             )
             c_hist = run_static_simulation(
                 initial_temp=inside_temp,
@@ -948,7 +951,7 @@ def evaluate_zone_plan(
                     if o_temp < c_temp and o_temp <= (inside_temp + 3.0):
                         macro_override = True
                 elif hvac_mode == "heat" or seasonal_mode in ["fall_transition", "coldsnap_prep"]:
-                    if o_temp > c_temp and o_temp >= (inside_temp - 3.0):
+                    if o_temp > c_temp and o_temp >= inside_temp and o_temp > max(safe_min_temp, active_heat_sp):
                         macro_override = True
 
         history, actions = run_hybrid_simulation(

@@ -183,6 +183,42 @@ class TestModelsAndTrainer(unittest.TestCase):
         m = models["upstairs_temp_profile_win_closed"]
         self.assertAlmostEqual(m.c_solar_south, 0.00025, places=5)
 
+    def test_trainer_enforces_closed_conductance_floor_on_open_model(self):
+        """Open-window model must have c_delta_t >= closed-window model c_delta_t and expanded OOD bounds."""
+        from unittest import mock
+        import numpy as np
+        from custom_components.passable_climate.training.trainer import train_all_models_sync
+
+        client = mock.MagicMock()
+        client.fetch_and_bin_profile_data.return_value = (
+            list(range(-10, 10)),
+            [0.05 * x + 0.5 for x in range(-10, 10)],
+            20,
+        )
+        rng = np.random.default_rng(99)
+
+        def fake_fetch_mlr(entity_id, **_kwargs):
+            X = np.zeros((320, 6))
+            if "windows_closed" in entity_id:
+                X[:, 0] = rng.uniform(-25.0, 20.0, size=320)
+                X[:, 1] = rng.uniform(-100.0, 100.0, size=320)
+                X[:, 2] = rng.uniform(0.0, 100.0, size=320)
+                Y = 0.045 * X[:, 0] + 0.001 * X[:, 1] + 0.2
+            else:
+                # Mild weather selection bias with tiny slope
+                X[:, 0] = rng.uniform(-5.0, 5.0, size=320)
+                X[:, 1] = rng.uniform(-10.0, 10.0, size=320)
+                X[:, 2] = rng.uniform(0.0, 100.0, size=320)
+                Y = 0.005 * X[:, 0] + 0.001 * X[:, 1] - 0.02
+            return ([tuple([float(y)] + list(x)) for y, x in zip(Y, X)], True)
+
+        client.fetch_mlr_data.side_effect = fake_fetch_mlr
+        models = train_all_models_sync(client, lookback_days=30)
+        m_closed = models["upstairs_temp_profile_win_closed"]
+        m_open = models["upstairs_temp_profile_win_open"]
+        self.assertGreaterEqual(m_open.c_delta_t, m_closed.c_delta_t)
+        self.assertLessEqual(m_open.feature_lo[0], m_closed.feature_lo[0])
+
 
 if __name__ == "__main__":
     unittest.main()

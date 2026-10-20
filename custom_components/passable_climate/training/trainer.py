@@ -131,6 +131,14 @@ def train_all_models_sync(
                 if is_open_model and c_wd > -0.01:
                     c_wd = max(0.0, c_wd)
 
+                # 3. Physical conductance floor for open windows:
+                # Opening windows adds a parallel advective exchange path to the closed building envelope
+                # (UA_open >= UA_closed). Prevent mild-weather selection bias from shrinking c_delta_t
+                # below the corresponding closed-window model's conductive slope.
+                closed_m = results.get(key.replace("_win_open", "_win_closed")) if is_open_model else None
+                if closed_m and closed_m.model_type == "mlr" and closed_m.c_delta_t is not None:
+                    c_dt = max(c_dt, float(closed_m.c_delta_t))
+
                 # Re-anchor intercept to preserve zero mean residual after coefficient clamping
                 clamped_vec = np.array([c_dt, c_wd, c_c, c_se, c_ss, c_sw], dtype=float)
                 mlr_intercept = float(np.mean(arr[:, 0]) - np.dot(np.mean(arr[:, 1:], axis=0), clamped_vec))
@@ -168,6 +176,18 @@ def train_all_models_sync(
                     model.feature_lo = np.percentile(arr[:, 1:], 1, axis=0).round(4).tolist()
                     model.feature_hi = np.percentile(arr[:, 1:], 99, axis=0).round(4).tolist()
                     model.rate_lo, model.rate_hi = (float(v) for v in np.percentile(arr[:, 0], [0.5, 99.5]))
+
+                    # Expand open-window OOD domain to at least cover the closed-window thermal range
+                    # so counterfactual simulations in cold/hot weather are not clipped to mild-weather bounds.
+                    if closed_m and closed_m.model_type == "mlr":
+                        if len(closed_m.feature_lo) == len(model.feature_lo):
+                            model.feature_lo = [round(min(o, c), 4) for o, c in zip(model.feature_lo, closed_m.feature_lo)]
+                        if len(closed_m.feature_hi) == len(model.feature_hi):
+                            model.feature_hi = [round(max(o, c), 4) for o, c in zip(model.feature_hi, closed_m.feature_hi)]
+                        if closed_m.rate_lo is not None and model.rate_lo is not None:
+                            model.rate_lo = min(model.rate_lo, closed_m.rate_lo)
+                        if closed_m.rate_hi is not None and model.rate_hi is not None:
+                            model.rate_hi = max(model.rate_hi, closed_m.rate_hi)
 
                     model.model_type = "mlr"
                     model.c_delta_t = round(c_dt, 6)

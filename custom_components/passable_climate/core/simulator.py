@@ -127,9 +127,9 @@ def run_hybrid_simulation(
                 # In cooling season, only open if opening actively cools faster than staying closed
                 if rate_open > 0.0 or rate_open >= rate_closed:
                     should_open = False
-            elif is_favorable and (hvac_mode == "heat" or seasonal_mode in ["fall_transition", "coldsnap_prep"]) and not macro_override:
-                # In heating season, only open if opening actively adds warmth
-                if rate_open <= 0.0:
+            elif is_favorable and (hvac_mode == "heat" or seasonal_mode in ["fall_transition", "coldsnap_prep"]):
+                # In heating season, only open if opening actively adds warmth and beats staying closed
+                if rate_open <= 0.0 or (not macro_override and rate_open <= rate_closed):
                     should_open = False
 
             current_action = "open" if should_open else "closed"
@@ -190,6 +190,7 @@ def run_static_simulation(
     lat: float,
     lon: float,
     solcast_forecast: list[dict[str, Any]] | None = None,
+    model_temp_closed: RateModel | None = None,
 ) -> list[dict[str, float]]:
     """Runs a baseline static simulation holding the windows in a fixed strategy ('closed' or 'open')."""
     simulated_temp = initial_temp
@@ -197,6 +198,7 @@ def run_static_simulation(
     history: list[dict[str, float]] = []
 
     active_temp_model = model_temp or RateModel("ransac", slope=(0.3 if strategy == "open" else 0.05), intercept=0.0)
+    closed_ref_model = model_temp_closed or RateModel("ransac", slope=0.05, intercept=0.0)
 
     for i in range(len(forecast)):
         current_f = forecast[i]
@@ -237,6 +239,16 @@ def run_static_simulation(
             ) / STEPS_PER_HOUR
             rate = max(-2.5, min(2.5, rate))
             if strategy == "open":
+                rate_closed = closed_ref_model.calculate_rate(
+                    delta_t, wind_speed, cloud_coverage, elevation, az_sin, az_cos, "closed", solcast_irradiance, False
+                ) / STEPS_PER_HOUR
+                rate_closed = max(-2.5, min(2.5, rate_closed))
+                # Thermodynamic monotonicity constraint:
+                # Convective ventilation cannot transfer heat opposite to the temperature gradient.
+                if delta_t < 0:
+                    rate = min(rate, rate_closed)
+                elif delta_t > 0:
+                    rate = max(rate, rate_closed)
                 if delta_t > 0 and rate > delta_t:
                     rate = delta_t
                 elif delta_t < 0 and rate < delta_t:

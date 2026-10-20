@@ -258,6 +258,86 @@ class TestAdvisorHumiditySafeguards(unittest.TestCase):
         )
         self.assertFalse(favorable)
 
+    def test_macro_override_does_not_open_into_colder_outdoor_air_in_heating_mode(self):
+        """macro_override must not allow opening windows in heating mode when outdoor temp <= indoor temp."""
+        from custom_components.passable_climate.engines.advisor import is_outside_air_favorable
+
+        favorable, _ = is_outside_air_favorable(
+            outside_temp=43.0,
+            outside_rh=93.0,
+            inside_temp=66.0,
+            inside_rh=50.6,
+            hvac_mode="heat",
+            seasonal_mode="normal",
+            inside_lower_bound=25.0,
+            inside_upper_bound=60.0,
+            safe_min_temp=64.0,
+            safe_max_temp=76.0,
+            is_bedtime=True,
+            macro_override=True,
+        )
+        self.assertFalse(favorable)
+
+    def test_overnight_heating_mode_inverted_mlr_models_keeps_windows_closed(self):
+        """Reproduces live bug: 43°F outdoor, 66°F indoor, heat mode at bedtime with shallower open MLR slope."""
+        cold_night_forecast = [
+            {
+                "datetime": (self.now + datetime.timedelta(hours=i)).isoformat(),
+                "temperature": 43.0 - 0.5 * i,
+                "humidity": 93.0,
+                "condition": "partlycloudy",
+                "wind_speed": 1.4,
+                "cloud_coverage": 67.0,
+            }
+            for i in range(6)
+        ]
+        inverted_models = {
+            "temp_open": RateModel(
+                model_type="mlr",
+                c_delta_t=0.004592,
+                c_wind_draft=0.0013185,
+                c_clouds=-0.00051,
+                c_solar_east=0.0,
+                c_solar_south=0.0,
+                c_solar_west=0.0,
+                mlr_intercept=-0.0229,
+            ),
+            "temp_closed": RateModel(
+                model_type="mlr",
+                c_delta_t=0.042445,
+                c_wind_draft=0.0009072,
+                c_clouds=-0.003767,
+                c_solar_east=0.0,
+                c_solar_south=0.0,
+                c_solar_west=0.0,
+                mlr_intercept=0.7936,
+            ),
+            "humidity_open": None,
+            "humidity_closed": None,
+        }
+        plan = evaluate_zone_plan(
+            zone_name="Upstairs",
+            inside_temp=66.0,
+            inside_humidity=50.64,
+            forecast=cold_night_forecast,
+            current_outside_temp=43.0,
+            models=inverted_models,
+            hvac_mode="heat",
+            seasonal_mode="normal",
+            comfort_profile=self.comfort_profile,
+            safe_min_temp=64.0,
+            safe_max_temp=76.0,
+            lat=39.0,
+            lon=-77.0,
+            is_bedtime=True,
+            is_evening=False,
+            active_heat_sp=65.0,
+            active_cool_sp=72.0,
+            now=self.now,
+        )
+        self.assertEqual(plan.recommended_state, "Close Windows")
+        self.assertNotEqual(plan.scenario, "safe_all_night")
+
 
 if __name__ == "__main__":
     unittest.main()
