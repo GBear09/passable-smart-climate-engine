@@ -15,6 +15,93 @@ from .solar import calculate_solar_position, decompose_facade_insolation, interp
 
 STEPS_PER_HOUR = 6  # 10-minute micro-steps
 
+
+def _parse_utc_dt(dt_raw: Any) -> datetime.datetime | None:
+    """Parses a string or datetime into a timezone-aware UTC datetime."""
+    if isinstance(dt_raw, str):
+        try:
+            dt = datetime.datetime.fromisoformat(dt_raw)
+        except Exception:
+            return None
+    elif isinstance(dt_raw, datetime.datetime):
+        dt = dt_raw
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _prepare_forecast_timeline(
+    forecast: list[dict[str, Any]],
+) -> list[ datetime.datetime | None]:
+    """Extracts parsed UTC timestamps for each forecast entry."""
+    return [_parse_utc_dt(f.get("datetime")) for f in forecast]
+
+
+def _interpolate_weather_at_step(
+    forecast: list[dict[str, Any]],
+    timeline: list[datetime.datetime | None],
+    hour_idx: int,
+    step: int,
+) -> tuple[float, float, float, float, datetime.datetime]:
+    """Interpolates weather variables and resolves exact wall-clock step_dt.
+
+    When forecast[0] is a mid-hour observation anchor (0 < dt_1 - dt_0 < 3600s),
+    interpolates weather at true wall-clock time (dt_0 + hour_idx*60m + step*10m)
+    across the timestamped forecast points so partial first hours are not stretched.
+    Falls back to index-based interpolation when timestamps are absent or non-monotonic.
+    """
+    dt_0 = timeline[0] if timeline else None
+    use_wall_clock = (
+        len(timeline) >= 2
+        and dt_0 is not None
+        and timeline[1] is not None
+        and 0.0 < (timeline[1] - dt_0).total_seconds() < 3600.0
+        and all(
+            timeline[k] is not None and timeline[k + 1] is not None and timeline[k + 1] >= timeline[k]
+            for k in range(len(timeline) - 1)
+        )
+    )
+
+    if use_wall_clock and dt_0 is not None:
+        step_dt = dt_0 + datetime.timedelta(minutes=(hour_idx * 60 + step * (60 / STEPS_PER_HOUR)))
+        # Find bracketing forecast interval [k, k+1]
+        k = len(forecast) - 1
+        progress = 0.0
+        for idx in range(len(timeline) - 1):
+            t_start = timeline[idx]
+            t_end = timeline[idx + 1]
+            if t_start is not None and t_end is not None and t_start <= step_dt <= t_end:
+                k = idx
+                span = (t_end - t_start).total_seconds()
+                progress = ((step_dt - t_start).total_seconds() / span) if span > 0 else 0.0
+                break
+        else:
+            if timeline[0] is not None and step_dt < timeline[0]:
+                k = 0
+                progress = 0.0
+        current_f = forecast[k]
+        next_f = forecast[k + 1] if (k + 1 < len(forecast) and progress > 0.0) else current_f
+    else:
+        current_f = forecast[hour_idx]
+        next_f = forecast[hour_idx + 1] if hour_idx + 1 < len(forecast) else current_f
+        progress = step / STEPS_PER_HOUR
+        utc_dt = timeline[hour_idx] or datetime.datetime.now(datetime.timezone.utc)
+        step_dt = utc_dt + datetime.timedelta(minutes=(step * (60 / STEPS_PER_HOUR)))
+
+    outside_temp = float(current_f["temperature"]) + (float(next_f["temperature"]) - float(current_f["temperature"])) * progress
+    outside_humidity = float(current_f["humidity"]) + (float(next_f["humidity"]) - float(current_f["humidity"])) * progress
+    cur_wind = float(current_f.get("wind_speed", 0.0))
+    nxt_wind = float(next_f.get("wind_speed", cur_wind))
+    wind_speed = cur_wind + (nxt_wind - cur_wind) * progress
+
+    cur_clouds = float(current_f.get("cloud_coverage", 50.0))
+    nxt_clouds = float(next_f.get("cloud_coverage", cur_clouds))
+    cloud_coverage = cur_clouds + (nxt_clouds - cur_clouds) * progress
+
+    return outside_temp, outside_humidity, wind_speed, cloud_coverage, step_dt
+
 def run_hybrid_simulation(
     initial_temp: float,
     initial_humidity: float,
@@ -44,37 +131,16 @@ def run_hybrid_simulation(
     model_hum_closed = models.get("humidity_closed")
 
     last_action = "open" if is_currently_open else "closed"
+    timeline = _prepare_forecast_timeline(forecast)
 
     for i in range(len(forecast)):
-        current_f = forecast[i]
-        next_f = forecast[i + 1] if i + 1 < len(forecast) else current_f
         first_step_open = False
         open_steps = 0
 
         for step in range(STEPS_PER_HOUR):
-            progress = step / STEPS_PER_HOUR
-            outside_temp = current_f["temperature"] + (next_f["temperature"] - current_f["temperature"]) * progress
-            outside_humidity = current_f["humidity"] + (next_f["humidity"] - current_f["humidity"]) * progress
-            cur_wind = float(current_f.get("wind_speed", 0.0))
-            nxt_wind = float(next_f.get("wind_speed", cur_wind))
-            wind_speed = cur_wind + (nxt_wind - cur_wind) * progress
-
-            cur_clouds = float(current_f.get("cloud_coverage", 50.0))
-            nxt_clouds = float(next_f.get("cloud_coverage", cur_clouds))
-            cloud_coverage = cur_clouds + (nxt_clouds - cur_clouds) * progress
-
-            dt_raw = current_f.get("datetime")
-            if isinstance(dt_raw, str):
-                utc_dt = datetime.datetime.fromisoformat(dt_raw)
-            elif isinstance(dt_raw, datetime.datetime):
-                utc_dt = dt_raw
-            else:
-                utc_dt = datetime.datetime.now(datetime.timezone.utc)
-
-            if utc_dt.tzinfo is None:
-                utc_dt = utc_dt.replace(tzinfo=datetime.timezone.utc)
-
-            step_dt = utc_dt + datetime.timedelta(minutes=(step * (60 / STEPS_PER_HOUR)))
+            outside_temp, outside_humidity, wind_speed, cloud_coverage, step_dt = _interpolate_weather_at_step(
+                forecast, timeline, i, step
+            )
 
             elevation, azimuth = calculate_solar_position(step_dt, lat, lon)
             solcast_irradiance = interpolate_solcast_power(step_dt, solcast_forecast or [])
@@ -115,11 +181,13 @@ def run_hybrid_simulation(
             rate_closed = max(-2.5, min(2.5, rate_closed))
 
             # Thermodynamic monotonicity constraint:
-            # Convective ventilation cannot transfer heat opposite to the temperature gradient.
+            # Convective ventilation adds a parallel advective exchange path along delta_t
+            # and cannot transfer heat opposite to the temperature gradient.
+            advective_min = (0.05 + 0.003 * wind_speed) * delta_t / STEPS_PER_HOUR
             if delta_t < 0:
-                rate_open = min(rate_open, rate_closed)
+                rate_open = min(rate_open, rate_closed + advective_min)
             elif delta_t > 0:
-                rate_open = max(rate_open, rate_closed)
+                rate_open = max(rate_open, rate_closed + advective_min)
 
             # Directional verification:
             should_open = is_favorable
@@ -199,35 +267,13 @@ def run_static_simulation(
 
     active_temp_model = model_temp or RateModel("ransac", slope=(0.3 if strategy == "open" else 0.05), intercept=0.0)
     closed_ref_model = model_temp_closed or RateModel("ransac", slope=0.05, intercept=0.0)
+    timeline = _prepare_forecast_timeline(forecast)
 
     for i in range(len(forecast)):
-        current_f = forecast[i]
-        next_f = forecast[i + 1] if i + 1 < len(forecast) else current_f
-
         for step in range(STEPS_PER_HOUR):
-            progress = step / STEPS_PER_HOUR
-            outside_temp = current_f["temperature"] + (next_f["temperature"] - current_f["temperature"]) * progress
-            outside_humidity = current_f["humidity"] + (next_f["humidity"] - current_f["humidity"]) * progress
-            cur_wind = float(current_f.get("wind_speed", 0.0))
-            nxt_wind = float(next_f.get("wind_speed", cur_wind))
-            wind_speed = cur_wind + (nxt_wind - cur_wind) * progress
-
-            cur_clouds = float(current_f.get("cloud_coverage", 50.0))
-            nxt_clouds = float(next_f.get("cloud_coverage", cur_clouds))
-            cloud_coverage = cur_clouds + (nxt_clouds - cur_clouds) * progress
-
-            dt_raw = current_f.get("datetime")
-            if isinstance(dt_raw, str):
-                utc_dt = datetime.datetime.fromisoformat(dt_raw)
-            elif isinstance(dt_raw, datetime.datetime):
-                utc_dt = dt_raw
-            else:
-                utc_dt = datetime.datetime.now(datetime.timezone.utc)
-
-            if utc_dt.tzinfo is None:
-                utc_dt = utc_dt.replace(tzinfo=datetime.timezone.utc)
-
-            step_dt = utc_dt + datetime.timedelta(minutes=(step * (60 / STEPS_PER_HOUR)))
+            outside_temp, outside_humidity, wind_speed, cloud_coverage, step_dt = _interpolate_weather_at_step(
+                forecast, timeline, i, step
+            )
 
             elevation, azimuth = calculate_solar_position(step_dt, lat, lon)
             solcast_irradiance = interpolate_solcast_power(step_dt, solcast_forecast or [])
@@ -244,11 +290,13 @@ def run_static_simulation(
                 ) / STEPS_PER_HOUR
                 rate_closed = max(-2.5, min(2.5, rate_closed))
                 # Thermodynamic monotonicity constraint:
-                # Convective ventilation cannot transfer heat opposite to the temperature gradient.
+                # Convective ventilation adds a parallel advective exchange path along delta_t
+                # and cannot transfer heat opposite to the temperature gradient.
+                advective_min = (0.05 + 0.003 * wind_speed) * delta_t / STEPS_PER_HOUR
                 if delta_t < 0:
-                    rate = min(rate, rate_closed)
+                    rate = min(rate, rate_closed + advective_min)
                 elif delta_t > 0:
-                    rate = max(rate, rate_closed)
+                    rate = max(rate, rate_closed + advective_min)
                 if delta_t > 0 and rate > delta_t:
                     rate = delta_t
                 elif delta_t < 0 and rate < delta_t:

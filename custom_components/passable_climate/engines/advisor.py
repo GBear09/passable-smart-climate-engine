@@ -51,6 +51,24 @@ def _format_time(dt: datetime.datetime | None) -> str:
     return f"{hour}:{dt.strftime('%M %p')}"
 
 
+def _resolve_horizon_dt(
+    forecast_slice: list[dict[str, Any]],
+    hours: int,
+    ref_now: datetime.datetime,
+) -> datetime.datetime:
+    """Resolves the wall-clock datetime after `hours` simulated hours."""
+    if not forecast_slice or hours >= len(forecast_slice):
+        return ref_now + datetime.timedelta(hours=hours)
+    dt_idx = _parse_local_dt(forecast_slice[hours].get("datetime"), ref_now)
+    if len(forecast_slice) >= 2:
+        dt_0 = _parse_local_dt(forecast_slice[0].get("datetime"), ref_now)
+        dt_1 = _parse_local_dt(forecast_slice[1].get("datetime"), ref_now)
+        gap_sec = (dt_1 - dt_0).total_seconds()
+        if 0 < gap_sec < 3300:
+            return dt_0 + datetime.timedelta(hours=hours)
+    return dt_idx
+
+
 def _get_temp_change_msg(
     inside_temp: float,
     history: list[dict[str, float]],
@@ -236,12 +254,8 @@ def is_outside_air_favorable(
     # 4. Heating Regimes (Free Heating, Fall Transition, Coldsnap Prep)
     elif hvac_mode == "heat" or seasonal_mode in ["fall_transition", "coldsnap_prep"]:
         eff_temp_margin = 0.0 if macro_override else temp_margin
-        heat_enthalpy_margin = 0.0 if macro_override else (0.1 if is_currently_open else 0.5)
         if outside_temp <= (inside_temp + eff_temp_margin):
             return False, f"Outdoor temperature ({outside_temp:.1f}°F) is not warm enough."
-
-        if (h_out - h_in) < heat_enthalpy_margin:
-            return False, "Insufficient thermal energy in outdoor air."
 
         if inside_temp >= safe_max_temp:
             return False, f"Indoor temperature ({inside_temp:.1f}°F) reached safe maximum ceiling."
@@ -1210,6 +1224,18 @@ def evaluate_zone_plan(
                     )
 
     # Contextual Explanation Strings
+    req_temp_margin = close_temp_margin if is_currently_open else open_temp_margin
+    out_dp = (
+        PsychrometricEngine.dew_point(current_outside_temp, forecast[0]["humidity"])
+        if forecast
+        else None
+    )
+    next_outside_temp = (
+        float(sim_forecast[1].get("temperature", current_outside_temp))
+        if len(sim_forecast) > 1
+        else current_outside_temp
+    )
+
     if seasonal_mode in ["spring_transition", "heatwave_prep"]:
         open_reason = "to actively pre-cool the house"
         if current_outside_temp > inside_temp:
@@ -1218,6 +1244,12 @@ def evaluate_zone_plan(
             close_reason = f"due to high humidity ({projected_rh:.1f}% projected vs {upper_bound:.1f}% limit at {inside_temp:.1f}°F)"
         elif lower_bound is not None and projected_rh is not None and projected_rh < lower_bound:
             close_reason = f"due to low humidity ({projected_rh:.1f}% projected vs {lower_bound:.1f}% limit at {inside_temp:.1f}°F)"
+        elif out_dp is not None and out_dp > max_dew_point:
+            close_reason = f"due to muggy outdoor air ({out_dp:.1f}°F dew point vs {max_dew_point:.1f}°F limit)"
+        elif current_outside_temp >= (inside_temp - req_temp_margin):
+            close_reason = f"as outdoor air ({current_outside_temp:.1f}°F) is not cool enough below indoor ({inside_temp:.1f}°F) for pre-cooling"
+        elif next_outside_temp >= (inside_temp - req_temp_margin):
+            close_reason = "to block outside heat as outdoor temperatures warm up"
         else:
             close_reason = "due to unfavorable outside conditions"
     elif seasonal_mode in ["fall_transition", "coldsnap_prep"]:
@@ -1228,6 +1260,12 @@ def evaluate_zone_plan(
             close_reason = f"due to high humidity ({projected_rh:.1f}% projected vs {upper_bound:.1f}% limit at {inside_temp:.1f}°F)"
         elif lower_bound is not None and projected_rh is not None and projected_rh < lower_bound:
             close_reason = f"due to low humidity ({projected_rh:.1f}% projected vs {lower_bound:.1f}% limit at {inside_temp:.1f}°F)"
+        elif out_dp is not None and out_dp > max_dew_point:
+            close_reason = f"due to muggy outdoor air ({out_dp:.1f}°F dew point vs {max_dew_point:.1f}°F limit)"
+        elif current_outside_temp <= (inside_temp + req_temp_margin):
+            close_reason = f"as outdoor air ({current_outside_temp:.1f}°F) is not warm enough above indoor ({inside_temp:.1f}°F) for pre-heating"
+        elif next_outside_temp <= (inside_temp + req_temp_margin):
+            close_reason = "to trap indoor heat as outdoor temperatures cool down"
         else:
             close_reason = "due to unfavorable outside conditions"
     elif hvac_mode == "cool":
@@ -1236,6 +1274,14 @@ def evaluate_zone_plan(
             close_reason = "to keep the cool air inside"
         elif upper_bound is not None and projected_rh is not None and projected_rh > upper_bound:
             close_reason = f"due to high humidity ({projected_rh:.1f}% projected vs {upper_bound:.1f}% limit at {inside_temp:.1f}°F)"
+        elif lower_bound is not None and projected_rh is not None and projected_rh < lower_bound:
+            close_reason = f"due to low humidity ({projected_rh:.1f}% projected vs {lower_bound:.1f}% limit at {inside_temp:.1f}°F)"
+        elif out_dp is not None and out_dp > max_dew_point:
+            close_reason = f"due to muggy outdoor air ({out_dp:.1f}°F dew point vs {max_dew_point:.1f}°F limit)"
+        elif current_outside_temp >= (inside_temp - req_temp_margin):
+            close_reason = f"as outdoor air ({current_outside_temp:.1f}°F) is not cool enough below indoor ({inside_temp:.1f}°F) for free cooling"
+        elif next_outside_temp >= (inside_temp - req_temp_margin):
+            close_reason = "to keep the cool air inside as outdoor temperatures warm up"
         else:
             close_reason = "due to unfavorable outside conditions"
     elif hvac_mode == "heat":
@@ -1244,6 +1290,14 @@ def evaluate_zone_plan(
             close_reason = "to keep the heat inside"
         elif lower_bound is not None and projected_rh is not None and projected_rh < lower_bound:
             close_reason = f"due to low humidity ({projected_rh:.1f}% projected vs {lower_bound:.1f}% limit at {inside_temp:.1f}°F)"
+        elif upper_bound is not None and projected_rh is not None and projected_rh > upper_bound:
+            close_reason = f"due to high humidity ({projected_rh:.1f}% projected vs {upper_bound:.1f}% limit at {inside_temp:.1f}°F)"
+        elif out_dp is not None and out_dp > max_dew_point:
+            close_reason = f"due to muggy outdoor air ({out_dp:.1f}°F dew point vs {max_dew_point:.1f}°F limit)"
+        elif current_outside_temp <= (inside_temp + req_temp_margin):
+            close_reason = f"as outdoor air ({current_outside_temp:.1f}°F) is not warm enough above indoor ({inside_temp:.1f}°F) for free heating"
+        elif next_outside_temp <= (inside_temp + req_temp_margin):
+            close_reason = "to keep the heat inside as outdoor temperatures cool down"
         else:
             close_reason = "due to unfavorable outside conditions"
     else:
@@ -1277,7 +1331,7 @@ def evaluate_zone_plan(
 
         temp_msg = _get_temp_change_msg(inside_temp, history, actions, closed_history)
         if len(actions) > 1 and actions[0].hours < len(sim_forecast):
-            change_dt = _parse_local_dt(sim_forecast[actions[0].hours].get("datetime"), ref_now)
+            change_dt = _resolve_horizon_dt(sim_forecast, actions[0].hours, ref_now)
             target_time_str = _format_time(change_dt)
             remaining_mins = (change_dt - ref_now).total_seconds() / 60.0
             if not is_currently_open and remaining_mins < open_dwell_minutes:
@@ -1325,7 +1379,7 @@ def evaluate_zone_plan(
                 and target_outside >= inside_temp
             )
             if not suppress_open_target:
-                change_dt = _parse_local_dt(sim_forecast[target_idx].get("datetime"), ref_now)
+                change_dt = _resolve_horizon_dt(sim_forecast, target_idx, ref_now)
                 target_time_str = _format_time(change_dt)
                 return ZonePlanResult(
                     recommended_state="Close Windows",

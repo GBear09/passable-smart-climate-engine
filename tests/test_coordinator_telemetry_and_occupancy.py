@@ -227,6 +227,101 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
         await self.coordinator._async_command_bool("input_boolean.eco", True)
         self.assertEqual(self.coordinator.hass.services.async_call.call_count, 2)
 
+    async def test_solcast_datetime_objects_and_live_cloud_coverage_in_evaluate(self):
+        """_async_evaluate must parse native datetime.datetime objects in Solcast detailedForecast and read live cloud_coverage."""
+        now = datetime.datetime(2026, 10, 30, 17, 26, 0, tzinfo=datetime.timezone.utc)
+        self.coordinator.hass.config.latitude = 38.8
+        self.coordinator.hass.config.longitude = -77.1
+
+        state_map = {}
+
+        def make_state(state_val, attrs=None):
+            s = mock.MagicMock()
+            s.state = str(state_val)
+            s.attributes = attrs or {}
+            s.last_reported = now
+            s.last_updated = now
+            return s
+
+        state_map["weather.home"] = make_state(
+            "sunny",
+            {
+                "temperature": 71.1,
+                "temperature_unit": "°F",
+                "humidity": 48.0,
+                "wind_speed": 6.2,
+                "wind_speed_unit": "mph",
+                "cloud_coverage": 0.0,
+            },
+        )
+        state_map["sensor.solcast_pv_forecast_forecast_today"] = make_state(
+            "18.5",
+            {
+                "detailedForecast": [
+                    {
+                        "period_start": datetime.datetime(2026, 10, 30, 17, 0, 0, tzinfo=datetime.timezone.utc),
+                        "pv_estimate": 3.9,
+                    },
+                    {
+                        "period_start": datetime.datetime(2026, 10, 30, 17, 30, 0, tzinfo=datetime.timezone.utc),
+                        "pv_estimate": 3.6,
+                    },
+                ]
+            },
+        )
+        state_map["sensor.upstairs_temp"] = make_state("68.1", {"unit_of_measurement": "°F"})
+        state_map["sensor.upstairs_humidity"] = make_state("51.0", {"unit_of_measurement": "%"})
+        state_map["sensor.upstairs_windows"] = make_state("0")
+
+        self.coordinator.hass.states.get.side_effect = lambda ent_id: state_map.get(ent_id)
+        self.coordinator.hass.services.async_call = mock.AsyncMock(
+            return_value={
+                "weather.home": {
+                    "forecast": [
+                        {
+                            "datetime": (now + datetime.timedelta(minutes=34)).isoformat(),
+                            "temperature": 70.6,
+                            "humidity": 42.0,
+                            "condition": "sunny",
+                            "wind_speed": 6.3,
+                            "cloud_coverage": 0.0,
+                        },
+                        {
+                            "datetime": (now + datetime.timedelta(minutes=94)).isoformat(),
+                            "temperature": 70.6,
+                            "humidity": 39.0,
+                            "condition": "sunny",
+                            "wind_speed": 5.9,
+                            "cloud_coverage": 0.0,
+                        },
+                    ]
+                }
+            }
+        )
+
+        with mock.patch("custom_components.passable_climate.coordinator.evaluate_zone_plan") as mock_eval:
+            from custom_components.passable_climate.core.models import SimulationAction, ZonePlanResult
+
+            mock_eval.return_value = ZonePlanResult(
+                recommended_state="Open Windows",
+                details_message="Open Upstairs windows for free heating.",
+                history=[{"temp": 69.0, "humidity": 49.0}],
+                actions=[SimulationAction("open", 1)],
+                eco_mode_requested=False,
+                scenario="open_continuous",
+            )
+            await self.coordinator._async_evaluate()
+
+            self.assertTrue(mock_eval.called)
+            call_kwargs = mock_eval.call_args.kwargs
+            # Verify Solcast detailedForecast with datetime.datetime objects was parsed into Watts
+            solcast_arg = call_kwargs["solcast_forecast"]
+            self.assertEqual(len(solcast_arg), 2)
+            self.assertAlmostEqual(solcast_arg[0]["power"], 3900.0)
+            # Verify obs_anchor at forecast[0] uses live cloud_coverage (0.0) rather than 50.0
+            forecast_arg = call_kwargs["forecast"]
+            self.assertAlmostEqual(forecast_arg[0]["cloud_coverage"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

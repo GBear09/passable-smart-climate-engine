@@ -1225,6 +1225,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         w_gust = self._to_mph(float(w_gust_raw or 0.0), w_unit)
         w_rh_raw = self._get_attr(weather_ent, "humidity")
         w_rh = float(w_rh_raw) if w_rh_raw is not None else None
+        w_clouds_raw = self._get_attr(weather_ent, "cloud_coverage")
+        if w_clouds_raw is None:
+            w_clouds_raw = self._read_float("sensor.openweathermap_cloud_coverage", lo=0.0, hi=100.0)
+        w_clouds = max(0.0, min(100.0, float(w_clouds_raw))) if w_clouds_raw is not None else 50.0
         weather_telemetry_degraded = (w_state is None or w_temp_raw is None or w_rh_raw is None)
 
         # Track wet ground / storm quiet period
@@ -1255,7 +1259,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "humidity": w_rh if w_rh is not None else 50.0,
             "wind_speed": w_wind,
             "condition": w_state or "cloudy",
-            "cloud_coverage": 50.0,
+            "cloud_coverage": w_clouds,
         }
         sanitized_forecast = self._sanitize_forecast(
             forecast_list,
@@ -1323,16 +1327,22 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             today_attrs = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
             tomorrow_attrs = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
-            if today_attrs and "detailedForecast" in today_attrs.attributes:
-                for item in today_attrs.attributes["detailedForecast"]:
-                    dt_p = datetime.datetime.fromisoformat(item["period_start"])
-                    solcast_forecast.append({"dt": dt_p, "power": float(item["pv_estimate"]) * 1000.0})
-            if tomorrow_attrs and "detailedForecast" in tomorrow_attrs.attributes:
-                for item in tomorrow_attrs.attributes["detailedForecast"]:
-                    dt_p = datetime.datetime.fromisoformat(item["period_start"])
-                    solcast_forecast.append({"dt": dt_p, "power": float(item["pv_estimate"]) * 1000.0})
-        except Exception:
-            pass
+            for state_obj in (today_attrs, tomorrow_attrs):
+                if state_obj and "detailedForecast" in state_obj.attributes:
+                    for item in state_obj.attributes["detailedForecast"]:
+                        raw_p = item.get("period_start")
+                        if isinstance(raw_p, datetime.datetime):
+                            dt_p = raw_p
+                        elif raw_p is not None:
+                            dt_p = dt_util.parse_datetime(str(raw_p)) or datetime.datetime.fromisoformat(str(raw_p))
+                        else:
+                            continue
+                        if dt_p.tzinfo is None:
+                            dt_p = dt_p.replace(tzinfo=datetime.timezone.utc)
+                        solcast_forecast.append({"dt": dt_p, "power": float(item["pv_estimate"]) * 1000.0})
+            solcast_forecast.sort(key=lambda x: x["dt"])
+        except Exception as err:
+            _LOGGER.debug("Could not parse Solcast detailedForecast: %s", err)
 
         solar_trans_ratio = 1.0
         try:

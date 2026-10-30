@@ -216,7 +216,8 @@ class TestModelsAndTrainer(unittest.TestCase):
         models = train_all_models_sync(client, lookback_days=30)
         m_closed = models["upstairs_temp_profile_win_closed"]
         m_open = models["upstairs_temp_profile_win_open"]
-        self.assertGreaterEqual(m_open.c_delta_t, m_closed.c_delta_t)
+        self.assertGreaterEqual(m_open.c_delta_t, m_closed.c_delta_t + 0.015)
+        self.assertGreaterEqual(m_open.c_wind_draft, m_closed.c_wind_draft)
         self.assertLessEqual(m_open.feature_lo[0], m_closed.feature_lo[0])
 
 

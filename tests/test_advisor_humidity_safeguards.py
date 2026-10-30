@@ -338,6 +338,219 @@ class TestAdvisorHumiditySafeguards(unittest.TestCase):
         self.assertEqual(plan.recommended_state, "Close Windows")
         self.assertNotEqual(plan.scenario, "safe_all_night")
 
+    def test_daytime_heating_free_warmth_with_higher_closed_intercept_and_midhour_anchor(self):
+        """Reproduces Oct 30 live scenario: 71.1°F outside, 68.1°F inside, higher closed intercept, mid-hour anchor."""
+        tz_edt = datetime.timezone(datetime.timedelta(hours=-4))
+        now_local = datetime.datetime(2026, 10, 30, 13, 26, 0, tzinfo=tz_edt)
+        forecast = [
+            {
+                "datetime": now_local.astimezone(datetime.timezone.utc).isoformat(),
+                "temperature": 71.1,
+                "humidity": 48.0,
+                "condition": "sunny",
+                "wind_speed": 6.2,
+                "cloud_coverage": 0.0,
+            },
+            {
+                "datetime": datetime.datetime(2026, 10, 30, 14, 0, 0, tzinfo=tz_edt)
+                .astimezone(datetime.timezone.utc)
+                .isoformat(),
+                "temperature": 70.6,
+                "humidity": 42.0,
+                "condition": "sunny",
+                "wind_speed": 6.35,
+                "cloud_coverage": 0.0,
+            },
+            {
+                "datetime": datetime.datetime(2026, 10, 30, 15, 0, 0, tzinfo=tz_edt)
+                .astimezone(datetime.timezone.utc)
+                .isoformat(),
+                "temperature": 70.6,
+                "humidity": 39.0,
+                "condition": "sunny",
+                "wind_speed": 5.91,
+                "cloud_coverage": 0.0,
+            },
+            {
+                "datetime": datetime.datetime(2026, 10, 30, 16, 0, 0, tzinfo=tz_edt)
+                .astimezone(datetime.timezone.utc)
+                .isoformat(),
+                "temperature": 68.7,
+                "humidity": 44.0,
+                "condition": "sunny",
+                "wind_speed": 4.65,
+                "cloud_coverage": 2.0,
+            },
+            {
+                "datetime": datetime.datetime(2026, 10, 30, 17, 0, 0, tzinfo=tz_edt)
+                .astimezone(datetime.timezone.utc)
+                .isoformat(),
+                "temperature": 64.0,
+                "humidity": 62.0,
+                "condition": "sunny",
+                "wind_speed": 2.33,
+                "cloud_coverage": 3.0,
+            },
+        ]
+        solcast = [
+            {
+                "dt": datetime.datetime(2026, 10, 30, 13, 30, 0, tzinfo=tz_edt).astimezone(
+                    datetime.timezone.utc
+                ),
+                "power": 3900.0,
+            },
+            {
+                "dt": datetime.datetime(2026, 10, 30, 14, 30, 0, tzinfo=tz_edt).astimezone(
+                    datetime.timezone.utc
+                ),
+                "power": 3200.0,
+            },
+            {
+                "dt": datetime.datetime(2026, 10, 30, 15, 30, 0, tzinfo=tz_edt).astimezone(
+                    datetime.timezone.utc
+                ),
+                "power": 2100.0,
+            },
+            {
+                "dt": datetime.datetime(2026, 10, 30, 16, 30, 0, tzinfo=tz_edt).astimezone(
+                    datetime.timezone.utc
+                ),
+                "power": 800.0,
+            },
+        ]
+        live_models = {
+            "temp_open": RateModel(
+                model_type="mlr",
+                c_delta_t=0.045231,
+                c_wind_draft=0.0013185,
+                c_clouds=-0.00051,
+                c_solar_east=0.0,
+                c_solar_south=0.0001857,
+                c_solar_west=0.0002749,
+                mlr_intercept=0.4413,
+            ),
+            "temp_closed": RateModel(
+                model_type="mlr",
+                c_delta_t=0.045231,
+                c_wind_draft=0.0014599,
+                c_clouds=-0.002975,
+                c_solar_east=0.0,
+                c_solar_south=0.0001357,
+                c_solar_west=0.0001494,
+                mlr_intercept=0.7341,
+            ),
+            "humidity_open": None,
+            "humidity_closed": None,
+        }
+        plan = evaluate_zone_plan(
+            zone_name="Upstairs",
+            inside_temp=68.1,
+            inside_humidity=51.45,
+            forecast=forecast,
+            current_outside_temp=71.1,
+            models=live_models,
+            hvac_mode="heat",
+            seasonal_mode="normal",
+            comfort_profile=self.comfort_profile,
+            safe_min_temp=64.0,
+            safe_max_temp=76.0,
+            lat=38.8,
+            lon=-77.1,
+            is_bedtime=False,
+            is_evening=False,
+            active_heat_sp=66.0,
+            active_cool_sp=72.0,
+            now=now_local,
+            solcast_forecast=solcast,
+        )
+        self.assertEqual(plan.recommended_state, "Open Windows")
+        self.assertGreaterEqual(plan.temp_change, 0.5)
+        self.assertIn("warmer than if kept closed", plan.details_message)
+
+    def test_specific_close_reasons_when_outdoor_warmer_in_heat_mode(self):
+        """When outdoor temp >= indoor temp in heat mode, close_reason must explain margin or cooling trend."""
+        # Case 1: Outdoor temp (68.5°F) is slightly above indoor (68.1°F) but within 1.0°F open_temp_margin
+        mild_forecast = [
+            {
+                "datetime": (self.now + datetime.timedelta(hours=i)).isoformat(),
+                "temperature": 68.5,
+                "humidity": 48.0,
+                "condition": "sunny",
+                "wind_speed": 5.0,
+                "cloud_coverage": 0.0,
+            }
+            for i in range(6)
+        ]
+        plan_margin = evaluate_zone_plan(
+            zone_name="Upstairs",
+            inside_temp=68.1,
+            inside_humidity=50.0,
+            forecast=mild_forecast,
+            current_outside_temp=68.5,
+            models=self.models,
+            hvac_mode="heat",
+            seasonal_mode="normal",
+            comfort_profile=self.comfort_profile,
+            safe_min_temp=64.0,
+            safe_max_temp=76.0,
+            lat=39.0,
+            lon=-77.0,
+            active_heat_sp=66.0,
+            active_cool_sp=72.0,
+            now=self.now,
+        )
+        self.assertEqual(plan_margin.recommended_state, "Close Windows")
+        self.assertIn("not warm enough above indoor", plan_margin.details_message)
+
+        # Case 2: Outdoor temp starts at 70.0°F at 13:50 but drops to 60.0°F at 14:00 (10 mins later)
+        t_anchor = datetime.datetime(2026, 10, 30, 17, 50, 0, tzinfo=datetime.timezone.utc)
+        cooling_forecast = [
+            {
+                "datetime": t_anchor.isoformat(),
+                "temperature": 70.0,
+                "humidity": 48.0,
+                "condition": "sunny",
+                "wind_speed": 5.0,
+                "cloud_coverage": 0.0,
+            },
+            {
+                "datetime": (t_anchor + datetime.timedelta(minutes=10)).isoformat(),
+                "temperature": 60.0,
+                "humidity": 55.0,
+                "condition": "sunny",
+                "wind_speed": 5.0,
+                "cloud_coverage": 0.0,
+            },
+            {
+                "datetime": (t_anchor + datetime.timedelta(minutes=70)).isoformat(),
+                "temperature": 58.0,
+                "humidity": 60.0,
+                "condition": "sunny",
+                "wind_speed": 5.0,
+                "cloud_coverage": 0.0,
+            },
+        ]
+        plan_cooling = evaluate_zone_plan(
+            zone_name="Upstairs",
+            inside_temp=68.1,
+            inside_humidity=50.0,
+            forecast=cooling_forecast,
+            current_outside_temp=70.0,
+            models=self.models,
+            hvac_mode="heat",
+            seasonal_mode="normal",
+            comfort_profile=self.comfort_profile,
+            safe_min_temp=64.0,
+            safe_max_temp=76.0,
+            lat=39.0,
+            lon=-77.0,
+            active_heat_sp=66.0,
+            active_cool_sp=72.0,
+            now=t_anchor,
+        )
+        self.assertEqual(plan_cooling.recommended_state, "Close Windows")
+        self.assertIn("as outdoor temperatures cool down", plan_cooling.details_message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,11 +133,16 @@ def train_all_models_sync(
 
                 # 3. Physical conductance floor for open windows:
                 # Opening windows adds a parallel advective exchange path to the closed building envelope
-                # (UA_open >= UA_closed). Prevent mild-weather selection bias from shrinking c_delta_t
-                # below the corresponding closed-window model's conductive slope.
+                # (UA_open > UA_closed). Prevent mild-weather selection bias from shrinking c_delta_t
+                # or c_wind_draft below the corresponding closed-window model's conductive slope plus
+                # a minimum physical ventilation increment.
                 closed_m = results.get(key.replace("_win_open", "_win_closed")) if is_open_model else None
                 if closed_m and closed_m.model_type == "mlr" and closed_m.c_delta_t is not None:
-                    c_dt = max(c_dt, float(closed_m.c_delta_t))
+                    closed_dt = float(closed_m.c_delta_t)
+                    min_open_dt = max(closed_dt * 1.5, closed_dt + (0.01 if is_hum else 0.04))
+                    c_dt = max(c_dt, min_open_dt)
+                    if closed_m.c_wind_draft is not None:
+                        c_wd = max(c_wd, max(0.0, float(closed_m.c_wind_draft)))
 
                 # Re-anchor intercept to preserve zero mean residual after coefficient clamping
                 clamped_vec = np.array([c_dt, c_wd, c_c, c_se, c_ss, c_sw], dtype=float)
