@@ -380,6 +380,8 @@ def determine_seasonal_mode(
     active_heat_sp: float,
     active_cool_sp: float,
     lookahead_days: int = 7,
+    now: datetime.datetime | None = None,
+    latitude: float = 38.0,
 ) -> tuple[str, str | None]:
     """Determines macro seasonal mode (Heatwave Prep, Spring/Fall Transition, or Normal)
     and evaluates the 48-Hour Imminent Threat Suspension Gate.
@@ -390,6 +392,29 @@ def determine_seasonal_mode(
     lookahead_forecast = forecast[: (lookahead_days * 24)]
     if not lookahead_forecast:
         return "normal", None
+
+    # Determine current month and seasonal window based on hemisphere
+    current_month: int | None = None
+    if now is not None:
+        current_month = now.month
+    else:
+        f0_dt = forecast[0].get("datetime")
+        if isinstance(f0_dt, str):
+            try:
+                current_month = datetime.datetime.fromisoformat(f0_dt).month
+            except Exception:
+                pass
+        elif isinstance(f0_dt, datetime.datetime):
+            current_month = f0_dt.month
+    if current_month is None:
+        current_month = datetime.datetime.now().month
+
+    if latitude < 0.0:
+        spring_months = (8, 9, 10, 11)
+        fall_months = (2, 3, 4, 5)
+    else:
+        spring_months = (2, 3, 4, 5)
+        fall_months = (8, 9, 10, 11)
 
     daily_highs: dict[str, float] = {}
     for f in lookahead_forecast:
@@ -432,13 +457,21 @@ def determine_seasonal_mode(
             elif comfort_profile.get("lower_profile", {}).get("temperature_data_points"):
                 min_comfort = min(comfort_profile["lower_profile"]["temperature_data_points"])
 
-        if (hvac_mode in ["cool", "off"]) and avg_temp < min_comfort:
+        if (
+            current_month in fall_months
+            and (hvac_mode in ["cool", "off"])
+            and avg_temp < min_comfort
+        ):
             candidate_mode = "fall_transition"
             candidate_details = (
                 f"Seasonal Mode (Fall Transition): Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F "
                 f"(below comfort minimum). Prioritizing passive heat retention."
             )
-        elif (hvac_mode in ["heat", "off"]) and avg_temp > (min_comfort - 5.0):
+        elif (
+            current_month in spring_months
+            and (hvac_mode in ["heat", "off"])
+            and avg_temp > (min_comfort - 5.0)
+        ):
             candidate_mode = "spring_transition"
             candidate_details = (
                 f"Seasonal Mode (Spring Transition): Avg forecast over next {lookahead_days} days is {round(avg_temp, 1)}°F. "

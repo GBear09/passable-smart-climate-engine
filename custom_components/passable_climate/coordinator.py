@@ -1470,6 +1470,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 comfort_profile=comfort_profile,
                 active_heat_sp=global_active_heat,
                 active_cool_sp=global_active_cool,
+                latitude=lat,
             )
             self.seasonal_mode = seasonal_mode
             self.seasonal_details = seasonal_details

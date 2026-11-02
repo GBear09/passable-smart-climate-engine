@@ -229,7 +229,7 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
 
     async def test_solcast_datetime_objects_and_live_cloud_coverage_in_evaluate(self):
         """_async_evaluate must parse native datetime.datetime objects in Solcast detailedForecast and read live cloud_coverage."""
-        now = datetime.datetime(2026, 10, 30, 17, 26, 0, tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
         self.coordinator.hass.config.latitude = 38.8
         self.coordinator.hass.config.longitude = -77.1
 
