@@ -1005,7 +1005,15 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         zones_config = self.entry_data.get(CONF_ZONES, {})
         for z_key, z_conf in zones_config.items():
             win_ent = z_conf.get(CONF_OPEN_WINDOWS_SENSOR)
-            if win_ent and win_ent not in entities_to_track:
+            if (
+                win_ent
+                and win_ent not in entities_to_track
+                and win_ent
+                not in (
+                    "sensor.upstairs_open_windows_count",
+                    "sensor.downstairs_open_windows_count",
+                )
+            ):
                 entities_to_track.append(win_ent)
             for bin_win in self.get_zone_window_sensors(z_key):
                 if bin_win and bin_win not in entities_to_track:
@@ -1039,6 +1047,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if entities_to_track:
             async def _handle_tracked_state_change(event: Any) -> None:
+                old_state = event.data.get("old_state")
+                new_state = event.data.get("new_state")
+                if not new_state or (old_state and old_state.state == new_state.state):
+                    return
                 _LOGGER.debug(
                     "Reactive trigger from tracked entity %s; refreshing climate plan.",
                     event.data.get("entity_id"),
