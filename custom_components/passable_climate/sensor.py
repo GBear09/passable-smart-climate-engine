@@ -364,6 +364,17 @@ class PassableAdvisorRecommendationSensor(CoordinatorEntity[SmartClimateCoordina
             "seasonal_details": self.coordinator.seasonal_details,
             "heat_prediction_alert": self.coordinator.heat_prediction_alert,
             "comfort_recovery_active": self.coordinator.comfort_recovery_active,
+            "pre_condition_needed": self.coordinator.pre_condition_needed,
+            "pre_condition_mode": self.coordinator.pre_condition_mode,
+            "pre_condition_start_time": self.coordinator.pre_condition_start_time,
+            "pre_condition_lead_minutes": self.coordinator.pre_condition_lead_minutes,
+            "predicted_breach_time": self.coordinator.predicted_breach_time,
+            "sleep_limiting_room": self.coordinator.sleep_limiting_room,
+            "sleep_limiting_room_entity": self.coordinator.sleep_limiting_room_entity,
+            "sleep_limiting_room_temp": self.coordinator.sleep_limiting_room_temp,
+            "recommended_sleep_offset_f": self.coordinator.recommended_sleep_offset_f,
+            "compliance_summary": self.coordinator.compliance_summary,
+            "learned_open_windows_fraction": self.coordinator.learned_open_windows_fraction,
         }
 
 class PassableOutdoorEnthalpySensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
@@ -632,6 +643,10 @@ class PassableOpenWindowsCountSensor(CoordinatorEntity[SmartClimateCoordinator],
     def native_value(self) -> int:
         return int(self.coordinator.open_windows_counts.get(self.scope_key, 0))
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.coordinator.open_windows_attrs.get(self.scope_key, {})
+
 
 class PassableZoneFaultTolerantRateSensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):
     """Fault-tolerant 10-minute rolling temperature derivative across active zone rooms."""
@@ -699,6 +714,8 @@ class PassableHvacLastActivitySensor(CoordinatorEntity[SmartClimateCoordinator],
         return {
             "last_hvac_mode": zt.get("last_hvac_mode", "idle"),
             "is_coasting": diag.get("is_coasting", False),
+            "learned_coast_f": diag.get("time_to_temp_attrs", {}).get("learned_coast_f", 0.3),
+            "learned_coast_minutes": diag.get("time_to_temp_attrs", {}).get("learned_coast_minutes", 20.0),
         }
 
 

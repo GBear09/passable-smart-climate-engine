@@ -137,6 +137,7 @@
           "high_wind_gust": "High Wind Gust Limit (mph)",
           "max_precipitation_probability": "Maximum Precipitation Probability (%)",
           "aqi_threshold": "Maximum Outdoor Air Quality Index (AQI)",
+          "window_contact_debounce_seconds": "Window/Door Contact Open Debounce (Seconds)",
           "preemptive_eco_mode": "Enable Pre-emptive HVAC Eco Mode"
         },
         "data_description": {
@@ -146,6 +147,7 @@
           "high_wind_gust": "Maximum peak wind gust speed that immediately triggers a window close veto. Default: 25.0 mph. Higher (30-35 mph): Tolerates occasional gusty conditions. Lower (18-20 mph): Instantly locks windows closed upon any sudden gust.",
           "max_precipitation_probability": "Forecast rain probability that triggers an automatic close veto. Default: 25.0%. Higher (35-45%): Tolerates slight chances of precipitation. Lower (10-15%): Strict rain protection; vetoes opening at any slight hint of rain.",
           "aqi_threshold": "Maximum outdoor AQI allowed before windows are vetoed closed. Default: 100 AQI.",
+          "window_contact_debounce_seconds": "Minimum duration a window or door binary sensor must remain continuously open before incrementing the open windows count or triggering Eco mode. Default: 120 seconds.",
           "preemptive_eco_mode": "When enabled, the advisor automatically requests HVAC Eco Mode as soon as open windows are recommended. When disabled (default), Eco Mode is only engaged reactively once physical window contact sensors detect that windows are actually open."
         }
       },

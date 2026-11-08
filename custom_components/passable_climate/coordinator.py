@@ -72,6 +72,7 @@ from .const import (
     CONF_SOLCAST_POWER_ENTITY,
     CONF_TEMP_SENSOR,
     CONF_WEATHER_ENTITY,
+    CONF_WINDOW_CONTACT_DEBOUNCE_SECONDS,
     CONF_WINDOW_ECO_BOOLEAN,
     CONF_ZONE_NAME,
     CONF_ZONES,
@@ -114,6 +115,7 @@ from .const import (
     DEFAULT_SOLCAST_POWER_ENTITY,
     DEFAULT_UPSTAIRS_WINDOW_SENSORS,
     DEFAULT_WEATHER_ENTITY,
+    DEFAULT_WINDOW_CONTACT_DEBOUNCE_SECONDS,
     DEFAULT_DOWNSTAIRS_WINDOW_SENSORS,
     DEFAULT_FILTER_CAPACITY_HOURS,
     DEFAULT_ROOMS,
@@ -129,6 +131,12 @@ from .const import (
     CONF_ROOMS,
     CONF_UPSTAIRS_WINDOW_SENSORS,
     DOMAIN,
+    METRIC_TEMP_CLOSED,
+    METRIC_TEMP_COOL,
+    METRIC_TEMP_HEAT,
+    METRIC_TEMP_OPEN,
+    RECONNECT_BLIP_GRACE_SECONDS,
+    STORAGE_KEY_COMPLIANCE,
     ZONE_MLR_RATE_SPECS,
 )
 from collections import deque
@@ -137,8 +145,10 @@ from .core.psychrometrics import PsychrometricEngine, pressure_from_elevation
 from .core.simulator import run_static_simulation
 from .engines.advisor import (
     BAD_WEATHER_CONDITIONS,
+    calculate_preconditioning_plan,
     determine_seasonal_mode,
     evaluate_environmental_vetoes,
+    evaluate_sleep_bedroom_offset,
     evaluate_zone_plan,
     get_comfort_bounds,
 )
@@ -147,10 +157,13 @@ from .engines.latch import (
     CLOSE,
     OPEN,
     SAFETY_SCENARIOS,
+    ComplianceLedger,
     RecommendationLatch,
+    WindowContactTracker,
 )
 from .engines.phases import PHASE_DAYTIME, determine_temporal_phase, resolve_zone_setpoints
 from .training.influx_client import InfluxClient
+from .training.regression import fit_online_rolling_ols
 from .training.trainer import train_all_models_sync
 
 _LOGGER = logging.getLogger(__name__)
@@ -174,6 +187,13 @@ DEFAULT_SEEDED_TELEMETRY: dict[str, dict[str, Any]] = {
         "cycle_timestamps": [],
         "active_since_ts": None,
         "last_action": "idle",
+        "swing_heat_samples": [],
+        "swing_cool_samples": [],
+        "coast_heat_samples": [],
+        "coast_cool_samples": [],
+        "coast_duration_samples": [],
+        "active_coast_tracker": None,
+        "off_target_idle_since": None,
     },
     "upstairs": {
         "filter_runtime_hours": 311.35,
@@ -187,6 +207,13 @@ DEFAULT_SEEDED_TELEMETRY: dict[str, dict[str, Any]] = {
         "cycle_timestamps": [],
         "active_since_ts": None,
         "last_action": "idle",
+        "swing_heat_samples": [],
+        "swing_cool_samples": [],
+        "coast_heat_samples": [],
+        "coast_cool_samples": [],
+        "coast_duration_samples": [],
+        "active_coast_tracker": None,
+        "off_target_idle_since": None,
     },
 }
 
@@ -224,8 +251,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._learning_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.learning_data")
         self._latch_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.latch")
         self._telemetry_store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.telemetry")
+        self._compliance_store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY_COMPLIANCE}.{entry.entry_id}")
 
         self._latch = RecommendationLatch()
+        self.window_tracker = WindowContactTracker()
+        self.compliance_ledger = ComplianceLedger()
         self._last_commanded: dict[str, bool] = {}
         self._recovery_since: datetime.datetime | None = None
         self.actuation_enabled: bool = False
@@ -266,6 +296,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Native MLR Telemetry, Filter Life, Daily Runtime & Health Diagnostics State
         self._series_buffers: dict[str, deque[tuple[float, float]]] = {}
+        self._online_ols_buffers: dict[str, deque[tuple[float, float]]] = {}
         self._last_telemetry_tick_ts: float | None = None
         self.telemetry_state: dict[str, dict[str, Any]] = {
             z: dict(DEFAULT_SEEDED_TELEMETRY[z]) for z in ("upstairs", "downstairs")
@@ -284,6 +315,22 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "downstairs": 0,
             "total": 0,
         }
+        self.open_windows_attrs: dict[str, dict[str, Any]] = {
+            "upstairs": {},
+            "downstairs": {},
+            "total": {},
+        }
+        self.pre_condition_needed: bool = False
+        self.pre_condition_mode: str | None = None
+        self.pre_condition_start_time: str | None = None
+        self.pre_condition_lead_minutes: int | None = None
+        self.predicted_breach_time: str | None = None
+        self.sleep_limiting_room: str | None = None
+        self.sleep_limiting_room_entity: str | None = None
+        self.sleep_limiting_room_temp: float | None = None
+        self.recommended_sleep_offset_f: float = 0.0
+        self.compliance_summary: str = "No open-window recommendations in the last 14 days"
+        self.learned_open_windows_fraction: float = 1.0
         self.zone_fault_tolerant_rates: dict[str, float] = {
             "upstairs": 0.0,
             "downstairs": 0.0,
@@ -371,6 +418,17 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._telemetry_store.async_delay_save(lambda: self.telemetry_state, 2)
         except Exception as err:
             _LOGGER.warning("Could not restore telemetry store: %s", err)
+
+        try:
+            cached_comp = await self._compliance_store.async_load()
+            if cached_comp and isinstance(cached_comp, dict):
+                self.compliance_ledger = ComplianceLedger.from_dict(cached_comp)
+                comp_sum = self.compliance_ledger.get_summary()
+                self.compliance_summary = comp_sum["compliance_summary"]
+                self.learned_open_windows_fraction = comp_sum["learned_open_windows_fraction"]
+                _LOGGER.info("Passable Smart Climate: Restored compliance ledger from storage.")
+        except Exception as err:
+            _LOGGER.warning("Could not restore compliance ledger: %s", err)
 
     def _weather_units(self, weather_ent: str) -> tuple[str, str]:
         """Reads temperature and wind speed units for a weather entity."""
@@ -551,19 +609,44 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         configured.append(w_ent)
         return configured
 
-    def get_zone_open_windows_count(self, zone_id: str) -> int:
-        """Count open window contact sensors for a zone, falling back to legacy count sensor if needed."""
+    def get_zone_open_windows_count(self, zone_id: str, now_utc: datetime.datetime | None = None) -> int:
+        """Count confirmed-open window contact sensors for a zone with per-sensor debounce
+        and reconnect-blip immunity, falling back to legacy count sensor if needed.
+        """
         win_sensors = self.get_zone_window_sensors(zone_id)
-        found_any = False
-        open_count = 0
+        raw_states: dict[str, str | None] = {}
+        found_any = any(w_ent in self.window_tracker._contacts for w_ent in win_sensors)
         for w_ent in win_sensors:
             st = self.hass.states.get(w_ent)
-            if st is not None and st.state not in _INVALID_STATES:
-                found_any = True
-                if st.state == "on":
-                    open_count += 1
+            if st is not None:
+                raw_states[w_ent] = st.state
+                if st.state not in _INVALID_STATES:
+                    found_any = True
         if found_any:
-            return open_count
+            debounce_sec = float(
+                self.options.get(
+                    CONF_WINDOW_CONTACT_DEBOUNCE_SECONDS,
+                    self.entry_data.get(
+                        CONF_WINDOW_CONTACT_DEBOUNCE_SECONDS,
+                        DEFAULT_WINDOW_CONTACT_DEBOUNCE_SECONDS,
+                    ),
+                )
+            )
+            res = self.window_tracker.evaluate_zone_contacts(
+                win_sensors,
+                raw_states,
+                now_utc or dt_util.utcnow(),
+                debounce_seconds=debounce_sec,
+                reconnect_grace_seconds=float(RECONNECT_BLIP_GRACE_SECONDS),
+            )
+            self.open_windows_attrs[zone_id] = {
+                "confirmed_open_sensors": res["confirmed_open_sensors"],
+                "pending_debounce_sensors": res["pending_debounce_sensors"],
+                "unavailable_sensors": res["unavailable_sensors"],
+                "raw_open_count": res["raw_open_count"],
+                "debounce_seconds": int(debounce_sec),
+            }
+            return int(res["confirmed_count"])
 
         zones_config = self.entry_data.get(CONF_ZONES, {})
         win_ent = zones_config.get(zone_id, {}).get(CONF_OPEN_WINDOWS_SENSOR)
@@ -679,15 +762,30 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         out_ah = self._calc_absolute_humidity(w_temp, w_rh)
         self.abs_humidity["outside"] = out_ah
 
-        # 2. Open Window Counts
-        up_win = self.get_zone_open_windows_count("upstairs")
-        down_win = self.get_zone_open_windows_count("downstairs")
+        # 2. Open Window Counts (Debounced & Blip-Immune)
+        up_win = self.get_zone_open_windows_count("upstairs", now_utc=now_utc)
+        down_win = self.get_zone_open_windows_count("downstairs", now_utc=now_utc)
         total_win = up_win + down_win
         self.open_windows_counts = {
             "upstairs": up_win,
             "downstairs": down_win,
             "total": total_win,
         }
+        up_w_attrs = self.open_windows_attrs.get("upstairs", {})
+        dn_w_attrs = self.open_windows_attrs.get("downstairs", {})
+        confirmed_open_all = list(up_w_attrs.get("confirmed_open_sensors", [])) + list(
+            dn_w_attrs.get("confirmed_open_sensors", [])
+        )
+        self.open_windows_attrs["total"] = {
+            "confirmed_open_sensors": confirmed_open_all,
+            "pending_debounce_sensors": list(up_w_attrs.get("pending_debounce_sensors", []))
+            + list(dn_w_attrs.get("pending_debounce_sensors", [])),
+            "unavailable_sensors": list(up_w_attrs.get("unavailable_sensors", []))
+            + list(dn_w_attrs.get("unavailable_sensors", [])),
+            "raw_open_count": int(up_w_attrs.get("raw_open_count", 0))
+            + int(dn_w_attrs.get("raw_open_count", 0)),
+        }
+        confirmed_open_set = set(confirmed_open_all)
 
         # 3. Per-Room Temperatures & 10-Minute Rolling Derivatives
         room_temps: dict[str, float | None] = {}
@@ -709,7 +807,14 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 r_open = sum(
                     1
                     for w_e in r_win_list
-                    if (self.hass.states.get(w_e) and self.hass.states.get(w_e).state == "on")
+                    if (
+                        w_e in confirmed_open_set
+                        or (
+                            w_e not in self.window_tracker._contacts
+                            and self.hass.states.get(w_e)
+                            and self.hass.states.get(w_e).state == "on"
+                        )
+                    )
                 )
             else:
                 r_zone = str(r_conf.get(CONF_ROOM_ZONE, "downstairs"))
@@ -776,13 +881,31 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             is_active_now = hvac_action in ("heating", "cooling")
             was_active = prev_action in ("heating", "cooling")
 
+            target_sp = c_attrs.get("temperature")
+            if target_sp is None:
+                target_sp = c_attrs.get("target_temp_low") if hvac_action == "heating" else c_attrs.get("target_temp_high")
+            target_f = float(target_sp) if target_sp is not None else None
+
             if is_active_now and not was_active:
                 zt["active_since_ts"] = now_utc.isoformat()
                 cycles = list(zt.get("cycle_timestamps", []))
                 cycles.append(now_utc.isoformat())
                 zt["cycle_timestamps"] = cycles
+                zt["active_coast_tracker"] = None
+                if in_temp is not None and target_f is not None:
+                    raw_swing = (target_f - in_temp) if hvac_action == "heating" else (in_temp - target_f)
+                    if 0.1 <= raw_swing <= 3.0:
+                        s_key = "swing_heat_samples" if hvac_action == "heating" else "swing_cool_samples"
+                        zt[s_key] = list(zt.get(s_key, []))[-19:] + [round(raw_swing, 2)]
             elif not is_active_now:
                 zt["active_since_ts"] = None
+                if was_active and in_temp is not None:
+                    zt["active_coast_tracker"] = {
+                        "mode": prev_action,
+                        "stop_ts": now_utc.isoformat(),
+                        "stop_temp": round(in_temp, 2),
+                        "peak_temp": round(in_temp, 2),
+                    }
 
             if is_active_now or was_active:
                 zt["last_active_ts"] = now_utc.isoformat()
@@ -809,7 +932,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     zt["fan_today"] = round(float(zt.get("fan_today", 0.0)) + dt_hours, 4)
                     zt["filter_runtime_hours"] = round(float(zt.get("filter_runtime_hours", 0.0)) + dt_hours, 4)
 
-            # Coasting evaluation (90-minute post-HVAC thermal inertia gate with rebound override)
+            # Coasting evaluation (90-minute post-HVAC thermal inertia gate with rebound override & learned coast)
             last_act_dt = dt_util.parse_datetime(str(zt.get("last_active_ts", "")))
             last_mode = str(zt.get("last_hvac_mode", "idle"))
             is_coasting = False
@@ -823,12 +946,56 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else:
                         is_coasting = True
 
-            # Physics-Based Time-to-Target & Health Diagnostics
-            target_sp = c_attrs.get("temperature")
-            if target_sp is None:
-                target_sp = c_attrs.get("target_temp_low") if hvac_action == "heating" else c_attrs.get("target_temp_high")
-            target_f = float(target_sp) if target_sp is not None else None
+            # Update active post-shutoff coast tracker
+            coast_tracker = zt.get("active_coast_tracker")
+            if not is_active_now and isinstance(coast_tracker, dict):
+                t_mode = str(coast_tracker.get("mode", "cooling"))
+                stop_dt = dt_util.parse_datetime(str(coast_tracker.get("stop_ts", "")))
+                elapsed_coast_s = (now_utc - stop_dt).total_seconds() if stop_dt else 9999.0
+                if in_temp is not None:
+                    prev_peak = float(coast_tracker.get("peak_temp", in_temp))
+                    if t_mode == "heating" and in_temp > prev_peak:
+                        coast_tracker["peak_temp"] = round(in_temp, 2)
+                    elif t_mode == "cooling" and in_temp < prev_peak:
+                        coast_tracker["peak_temp"] = round(in_temp, 2)
+                rebounded = (t_mode == "cooling" and ft_rate >= 0.0) or (
+                    t_mode == "heating" and ft_rate <= 0.0
+                )
+                if rebounded or elapsed_coast_s >= 5400.0:
+                    if elapsed_coast_s >= 120.0:
+                        coast_mag = abs(
+                            float(coast_tracker.get("peak_temp", 0.0))
+                            - float(coast_tracker.get("stop_temp", 0.0))
+                        )
+                        coast_mins = min(90.0, max(2.0, elapsed_coast_s / 60.0))
+                        c_key = "coast_heat_samples" if t_mode == "heating" else "coast_cool_samples"
+                        if 0.0 <= coast_mag <= 4.0:
+                            zt[c_key] = list(zt.get(c_key, []))[-19:] + [round(coast_mag, 2)]
+                        zt["coast_duration_samples"] = list(
+                            zt.get("coast_duration_samples", [])
+                        )[-19:] + [round(coast_mins, 1)]
+                    zt["active_coast_tracker"] = None
 
+            sh_samples = zt.get("swing_heat_samples", [])
+            sc_samples = zt.get("swing_cool_samples", [])
+            ch_samples = zt.get("coast_heat_samples", [])
+            cc_samples = zt.get("coast_cool_samples", [])
+            cd_samples = zt.get("coast_duration_samples", [])
+            learned_swing_heat_f = round(sum(sh_samples) / len(sh_samples), 2) if sh_samples else 0.5
+            learned_swing_cool_f = round(sum(sc_samples) / len(sc_samples), 2) if sc_samples else 0.5
+            active_coast_samples = (
+                ch_samples if (hvac_action == "heating" or last_mode == "heating") else cc_samples
+            )
+            learned_coast_f = (
+                round(sum(active_coast_samples) / len(active_coast_samples), 2)
+                if active_coast_samples
+                else 0.3
+            )
+            learned_coast_minutes = (
+                round(sum(cd_samples) / len(cd_samples), 1) if cd_samples else 20.0
+            )
+
+            # Physics-Based Time-to-Target & Health Diagnostics
             active_run_mins = 0.0
             if zt.get("active_since_ts"):
                 act_dt = dt_util.parse_datetime(str(zt["active_since_ts"]))
@@ -863,18 +1030,90 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             rem_h = round(float(cap_h) - float(zt.get("filter_runtime_hours", 0.0)), 1)
 
             cph = len(valid_cycles)
+            stall_reason: str | None = None
             if cph > 4:
                 health_status = "Short Cycling"
+                stall_reason = f"Compressor started {cph} times in the last 60 minutes (>4 CPH limit)."
             elif is_active_now and active_run_mins >= 20.0 and (
                 (hvac_action == "cooling" and ft_rate > -0.1)
                 or (hvac_action == "heating" and ft_rate < 0.1)
             ):
                 health_status = "Thermal Stall"
+                stall_reason = f"Active {hvac_action} for {int(round(active_run_mins))}m with insufficient thermal rate ({ft_rate:+.2f}°F/h)."
             elif rem_h <= 0.0:
                 health_status = "Filter Overdue"
+                stall_reason = f"HVAC filter runtime exceeded capacity ({abs(rem_h):.1f}h overdue)."
             else:
                 health_status = "Optimal"
 
+            # Off-Target Idle Comfort Stall Check (only when otherwise Optimal)
+            if is_active_now:
+                zt["off_target_idle_since"] = None
+            else:
+                z_open_now = up_win if z_key == "upstairs" else down_win
+                window_eco_now = (
+                    self._get_val(
+                        z_conf.get(
+                            CONF_WINDOW_ECO_BOOLEAN,
+                            f"input_boolean.eco_mode_request_{z_key}_hvac_advisor",
+                        ),
+                        "off",
+                    )
+                    == "on"
+                )
+                circ_eco_now = (
+                    self._get_val(z_conf.get(CONF_CIRCULATION_ECO_BOOLEAN), "off") == "on"
+                )
+                floor_eco_now = self._get_val(f"input_boolean.eco_mode_{z_key}", "off") == "on"
+                eco_active_now = window_eco_now or circ_eco_now or floor_eco_now
+                presence_ent_now = self.options.get(
+                    CONF_PRESENCE_ENTITY,
+                    self.entry_data.get(CONF_PRESENCE_ENTITY, DEFAULT_PRESENCE_ENTITY),
+                )
+                home_mode_ent_now = self.options.get(
+                    CONF_HOME_MODE_ENTITY,
+                    self.entry_data.get(CONF_HOME_MODE_ENTITY, DEFAULT_HOME_MODE_ENTITY),
+                )
+                someone_home_now = (self._get_val(presence_ent_now, "on") == "on") and (
+                    str(self._get_val(home_mode_ent_now, "Home") or "Home").lower()
+                    not in {"away", "vacation"}
+                )
+                c_mode_now = str(c_st_obj.state if c_st_obj else "off").lower()
+                comfort_min_now = float(
+                    self.comfort_settings.get(CONF_COMFORT_TEMP_MIN, DEFAULT_COMFORT_TEMP_MIN)
+                )
+                comfort_max_now = float(
+                    self.comfort_settings.get(CONF_COMFORT_TEMP_MAX, DEFAULT_COMFORT_TEMP_MAX)
+                )
+                heat_ref = (
+                    target_f
+                    if (target_f is not None and c_mode_now in ("heat", "heat_cool", "auto"))
+                    else comfort_min_now
+                )
+                cool_ref = (
+                    target_f
+                    if (target_f is not None and c_mode_now in ("cool", "heat_cool", "auto"))
+                    else comfort_max_now
+                )
+                off_target_msg: str | None = None
+                if in_temp is not None and z_open_now == 0 and not eco_active_now and someone_home_now:
+                    if in_temp < (heat_ref - learned_swing_heat_f - 1.0):
+                        off_target_msg = f"Zone temperature ({in_temp:.1f}°F) has remained below target ({heat_ref:.1f}°F) with HVAC idle"
+                    elif in_temp > (cool_ref + learned_swing_cool_f + 1.0):
+                        off_target_msg = f"Zone temperature ({in_temp:.1f}°F) has remained above target ({cool_ref:.1f}°F) with HVAC idle"
+
+                if off_target_msg:
+                    if not zt.get("off_target_idle_since"):
+                        zt["off_target_idle_since"] = now_utc.isoformat()
+                    idle_dt = dt_util.parse_datetime(str(zt["off_target_idle_since"]))
+                    idle_mins = (now_utc - idle_dt).total_seconds() / 60.0 if idle_dt else 0.0
+                    if idle_mins >= 90.0 and health_status == "Optimal":
+                        health_status = "Idle Comfort Stall"
+                        stall_reason = f"{off_target_msg} for {int(round(idle_mins))}m."
+                else:
+                    zt["off_target_idle_since"] = None
+
+            prev_ttt_attrs = self.zone_diagnostics.get(z_key, {}).get("time_to_temp_attrs", {})
             self.zone_diagnostics[z_key] = {
                 "time_to_temp": time_to_temp,
                 "time_to_temp_attrs": {
@@ -885,6 +1124,15 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "predicted_rate_f_hr": round(pred_rate, 2),
                     "observed_rate_f_hr": ft_rate,
                     "active_runtime_minutes": round(active_run_mins, 1),
+                    "learned_swing_heat_f": learned_swing_heat_f,
+                    "learned_swing_cool_f": learned_swing_cool_f,
+                    "learned_coast_f": learned_coast_f,
+                    "learned_coast_minutes": learned_coast_minutes,
+                    "pre_condition_needed": prev_ttt_attrs.get("pre_condition_needed", False),
+                    "pre_condition_mode": prev_ttt_attrs.get("pre_condition_mode"),
+                    "pre_condition_start_time": prev_ttt_attrs.get("pre_condition_start_time"),
+                    "pre_condition_lead_minutes": prev_ttt_attrs.get("pre_condition_lead_minutes"),
+                    "predicted_breach_time": prev_ttt_attrs.get("predicted_breach_time"),
                 },
                 "health_status": health_status,
                 "health_attrs": {
@@ -893,6 +1141,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "observed_rate_f_hr": ft_rate,
                     "filter_life_remaining_hours": rem_h,
                     "is_coasting": is_coasting,
+                    "stall_reason": stall_reason,
                 },
                 "cycles_per_hour": cph,
                 "is_coasting": is_coasting,
@@ -957,6 +1206,48 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if z_action == "cooling" and total_win == 0 and abs(ah_rate) < 5.0:
                         val_out = round(ah_rate, 3)
                 self.zone_mlr_rates[full_key] = val_out
+
+                # Phase 7: Zero-InfluxDB Online Rolling OLS + EWMA Fallback Learner
+                # Only updates when InfluxDB has not yet provided a trained model for this regime
+                if (
+                    val_out is not None
+                    and in_temp is not None
+                    and w_temp is not None
+                    and mode_type in ("temp_closed", "temp_open", "temp_heat", "temp_cool")
+                ):
+                    metric_map = {
+                        "temp_closed": METRIC_TEMP_CLOSED,
+                        "temp_open": METRIC_TEMP_OPEN,
+                        "temp_heat": METRIC_TEMP_HEAT,
+                        "temp_cool": METRIC_TEMP_COOL,
+                    }
+                    m_key = f"{z_key}_{metric_map[mode_type]}"
+                    ols_buf = self._online_ols_buffers.setdefault(m_key, deque(maxlen=30))
+                    ols_buf.append((float(w_temp - in_temp), float(val_out)))
+                    existing_m = self.models.get(m_key)
+                    has_influx_model = existing_m is not None and (
+                        existing_m.mlr_data_points > 0 or len(existing_m.x_data) > 0
+                    )
+                    if not has_influx_model and len(ols_buf) >= 6:
+                        slope_o, intercept_o, r_sq = fit_online_rolling_ols(
+                            list(ols_buf), regime=mode_type
+                        )
+                        if slope_o is not None and intercept_o is not None:
+                            if existing_m is not None and existing_m.model_type == "online_ewma":
+                                alpha = 0.25 if r_sq >= 0.7 else (0.15 if r_sq >= 0.3 else 0.08)
+                                new_s = round((1.0 - alpha) * existing_m.slope + alpha * slope_o, 4)
+                                new_b = round(
+                                    (1.0 - alpha) * existing_m.intercept + alpha * intercept_o, 4
+                                )
+                            else:
+                                new_s, new_b = slope_o, intercept_o
+                            self.models[m_key] = RateModel(
+                                model_type="online_ewma",
+                                slope=new_s,
+                                intercept=new_b,
+                                equation=f"y = {new_s:.4f}x + {new_b:.2f} (Online EWMA, R²={r_sq:.2f})",
+                                last_updated=now_local.strftime("%Y-%m-%d %H:%M:%S"),
+                            )
 
         # Per-Room Passive Heat Loss/Gain Rates
         for r_slug, r_conf in rooms_config.items():
@@ -1507,6 +1798,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         any_recovery_triggered = False
         recovery_exit_blocked = False
         desired_eco: dict[str, bool] = {}
+        zone_precond_plans: dict[str, dict[str, Any]] = {}
+        zone_in_comfort: dict[str, bool] = {"upstairs": True, "downstairs": True}
+        upstairs_eval_temp: float | None = None
+        upstairs_eval_mode: str = "off"
 
         for z_key, z_conf in zones_config.items():
             z_name = z_conf.get(CONF_ZONE_NAME, z_key.capitalize())
@@ -1547,6 +1842,9 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             c_eff = self._effective_hvac_mode(c_st, c_attrs, w_temp, in_temp)
             if c_eff in ("cool", "heat"):
                 overall_hvac_mode = c_eff
+            if z_key == "upstairs":
+                upstairs_eval_temp = in_temp
+                upstairs_eval_mode = c_eff
 
             safe_min = min(65.0, act_heat) - 1.0
             safe_max = max(75.0, act_cool) + 1.0
@@ -1608,6 +1906,52 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 plan.scenario = "unoccupied_veto" if is_unoccupied else "hazard_vetoed"
 
             zone_plans[z_key] = plan
+
+            # Phase 4: Dynamic Rate-Derived Pre-Conditioning Lead Time (Additive Diagnostics)
+            closed_pre_hist = (
+                run_static_simulation(
+                    initial_temp=in_temp,
+                    initial_humidity=in_hum,
+                    forecast=sanitized_forecast[:12],
+                    model_temp=z_models.get("temp_closed"),
+                    model_hum=z_models.get("humidity_closed"),
+                    strategy="closed",
+                    lat=lat,
+                    lon=lon,
+                    solcast_forecast=solcast_forecast,
+                )
+                if sanitized_forecast
+                else []
+            )
+            precond_plan = calculate_preconditioning_plan(
+                closed_history=closed_pre_hist,
+                forecast=sanitized_forecast,
+                hvac_mode=c_eff,
+                seasonal_mode=seasonal_mode,
+                inside_temp=in_temp,
+                active_heat_sp=act_heat,
+                active_cool_sp=act_cool,
+                safe_min_temp=safe_min,
+                safe_max_temp=safe_max,
+                hvac_heat_model=self.models.get(f"{z_key}_temp_profile_hvac_heat"),
+                hvac_cool_model=self.models.get(f"{z_key}_temp_profile_hvac_cool"),
+                now=now,
+            )
+            zone_precond_plans[z_key] = precond_plan
+            if z_key in self.zone_diagnostics:
+                ttt_attrs = self.zone_diagnostics[z_key].setdefault("time_to_temp_attrs", {})
+                ttt_attrs["pre_condition_needed"] = precond_plan["pre_condition_needed"]
+                ttt_attrs["pre_condition_mode"] = precond_plan["pre_condition_mode"]
+                ttt_attrs["pre_condition_start_time"] = precond_plan["pre_condition_start_time"]
+                ttt_attrs["pre_condition_lead_minutes"] = precond_plan["pre_condition_lead_minutes"]
+                ttt_attrs["predicted_breach_time"] = precond_plan["predicted_breach_time"]
+
+            lb_c, ub_c = get_comfort_bounds(in_temp, comfort_profile)
+            zone_in_comfort[z_key] = (
+                safe_min <= in_temp <= safe_max
+                and (ub_c is None or in_hum <= ub_c)
+                and (lb_c is None or is_bedtime or in_hum >= lb_c)
+            )
 
             # Queue eco mode request
             eco_bool = z_conf.get(CONF_WINDOW_ECO_BOOLEAN, f"input_boolean.eco_mode_request_{z_key}_hvac_advisor")
@@ -1719,6 +2063,78 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for ent, want in desired_eco.items():
             await self._async_command_bool(ent, want)
 
+        # Phase 3: Helper Invariant Verification Watchdog
+        for z_k_inv, z_c_inv in zones_config.items():
+            mem_inv = self.circulation_manager.get_zone_memory(z_k_inv)
+            if mem_inv.get("start_time") is None:
+                c_eco_ent = z_c_inv.get(CONF_CIRCULATION_ECO_BOOLEAN)
+                if c_eco_ent and self._get_val(c_eco_ent, "off") == "on":
+                    await self._async_command_bool(c_eco_ent, False)
+            if z_k_inv in self.zone_diagnostics:
+                self.zone_diagnostics[z_k_inv].setdefault("health_attrs", {})[
+                    "last_invariant_check"
+                ] = now_utc.isoformat()
+
+        # Phase 4: Aggregate Pre-Conditioning Plan Diagnostics
+        active_precond = (
+            zone_precond_plans.get("upstairs")
+            if zone_precond_plans.get("upstairs", {}).get("pre_condition_needed")
+            else (
+                zone_precond_plans.get("downstairs")
+                if zone_precond_plans.get("downstairs", {}).get("pre_condition_needed")
+                else {}
+            )
+        )
+        self.pre_condition_needed = bool(active_precond.get("pre_condition_needed", False))
+        self.pre_condition_mode = active_precond.get("pre_condition_mode")
+        self.pre_condition_start_time = active_precond.get("pre_condition_start_time")
+        self.pre_condition_lead_minutes = active_precond.get("pre_condition_lead_minutes")
+        self.predicted_breach_time = active_precond.get("predicted_breach_time")
+
+        # Phase 5: Sleep-Window Worst-Case Bedroom Comfort & Offset Advisory
+        if is_bedtime or is_evening:
+            rooms_cfg = self.get_configured_rooms()
+            r_temps_eval: dict[str, float | None] = {}
+            r_rates_eval: dict[str, float | None] = {}
+            for r_s, r_c in rooms_cfg.items():
+                if isinstance(r_c, dict):
+                    rt_ent = r_c.get(CONF_ROOM_TEMP_SENSOR)
+                    rt_unit = self._get_attr(rt_ent, "unit_of_measurement", "°F")
+                    rt_raw = self._read_float(rt_ent, lo=-10.0, hi=120.0)
+                    r_temps_eval[r_s] = self._to_f(rt_raw, rt_unit) if rt_raw is not None else None
+                    r_rates_eval[r_s] = self.room_mlr_rates.get(
+                        f"{r_s}_heat_loss_gain_windows_closed"
+                    )
+            up_ttt_a = self.zone_diagnostics.get("upstairs", {}).get("time_to_temp_attrs", {})
+            sleep_adv = evaluate_sleep_bedroom_offset(
+                rooms_config=rooms_cfg,
+                room_temps=r_temps_eval,
+                room_rates=r_rates_eval,
+                zone_temp=upstairs_eval_temp,
+                hvac_mode=upstairs_eval_mode or overall_hvac_mode,
+                seasonal_mode=seasonal_mode,
+                active_heat_sp=up_sp[0],
+                active_cool_sp=up_sp[1],
+                comfort_temp_min=float(
+                    self.comfort_settings.get(CONF_COMFORT_TEMP_MIN, DEFAULT_COMFORT_TEMP_MIN)
+                ),
+                comfort_temp_max=float(
+                    self.comfort_settings.get(CONF_COMFORT_TEMP_MAX, DEFAULT_COMFORT_TEMP_MAX)
+                ),
+                swing_heat_f=float(up_ttt_a.get("learned_swing_heat_f", 0.5)),
+                swing_cool_f=float(up_ttt_a.get("learned_swing_cool_f", 0.5)),
+                prev_offset_f=self.recommended_sleep_offset_f,
+            )
+            self.sleep_limiting_room = sleep_adv["sleep_limiting_room"]
+            self.sleep_limiting_room_entity = sleep_adv["sleep_limiting_room_entity"]
+            self.sleep_limiting_room_temp = sleep_adv["sleep_limiting_room_temp"]
+            self.recommended_sleep_offset_f = sleep_adv["recommended_sleep_offset_f"]
+        else:
+            self.sleep_limiting_room = None
+            self.sleep_limiting_room_entity = None
+            self.sleep_limiting_room_temp = None
+            self.recommended_sleep_offset_f = 0.0
+
         self.zone_results = zone_plans
 
         # 6. Combined Recommendation & State Machine Latch
@@ -1752,6 +2168,25 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_recommendation = final_state
         self._latch_store.async_delay_save(self._latch.as_dict, 5)
 
+        # Phase 6: Behavioral Window-Compliance & Recommendation Audit Ledger
+        up_sensors_total = len(self.get_zone_window_sensors("upstairs"))
+        dn_sensors_total = len(self.get_zone_window_sensors("downstairs"))
+        self.compliance_ledger.record_step(
+            now=now,
+            recommendation=final_state,
+            up_open_count=int(self.open_windows_counts.get("upstairs", 0)),
+            up_total_sensors=up_sensors_total,
+            dn_open_count=int(self.open_windows_counts.get("downstairs", 0)),
+            dn_total_sensors=dn_sensors_total,
+            up_in_comfort=zone_in_comfort.get("upstairs", True),
+            dn_in_comfort=zone_in_comfort.get("downstairs", True),
+            dt_minutes=15.0,
+        )
+        comp_summary = self.compliance_ledger.get_summary()
+        self.compliance_summary = comp_summary["compliance_summary"]
+        self.learned_open_windows_fraction = comp_summary["learned_open_windows_fraction"]
+        self._compliance_store.async_delay_save(self.compliance_ledger.as_dict, 30)
+
         # Markdown details formulation
         ts_str = f"{now.hour % 12 or 12}:{now.strftime('%M %p on %b')} {now.day}"
         details = f"**Action Plan as of {ts_str}:**\n\n"
@@ -1778,6 +2213,13 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if seasonal_details:
             details += f"\n\n{seasonal_details}"
+
+        if self.pre_condition_needed and self.pre_condition_start_time:
+            pre_verb = "pre-cooling" if self.pre_condition_mode == "cool" else "pre-heating"
+            details += (
+                f"\n\n**Pre-Conditioning Advisory:** Start {pre_verb} around **{self.pre_condition_start_time}** "
+                f"(~{self.pre_condition_lead_minutes}m lead time before {self.predicted_breach_time} threshold)."
+            )
 
         if self.comfort_recovery_active and is_vetoed:
             details += "\n\n*(Comfort recovery active: HVAC running to restore indoor comfort)*"

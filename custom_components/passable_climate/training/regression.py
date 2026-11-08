@@ -158,3 +158,81 @@ def multiple_linear_regression(
     except Exception as err:
         _LOGGER.error("Multiple Linear Regression error: %s", err)
         return None, None, None
+
+
+def fit_online_rolling_ols(
+    samples: list[tuple[float, float]],
+    regime: str = "temp_closed",
+) -> tuple[float | None, float | None, float]:
+    """Fit a physical-sign-clamped 1D Ordinary Least Squares model (rate vs delta_t)
+    from a rolling window of homogeneous telemetry observations.
+    Requires at least 6 observations (~30 minutes of 5-min ticks or 6+ 1-min ticks).
+    Returns: (slope, intercept, r_squared) or (None, None, 0.0) if invalid.
+    """
+    try:
+        if len(samples) < 6:
+            return None, None, 0.0
+
+        arr = np.array(samples, dtype=np.float64)
+        x = arr[:, 0]
+        y = arr[:, 1]
+        if not (np.all(np.isfinite(x)) and np.all(np.isfinite(y))):
+            return None, None, 0.0
+
+        mean_x = float(np.mean(x))
+        mean_y = float(np.mean(y))
+        std_x = float(np.std(x))
+        std_y = float(np.std(y))
+
+        if std_x >= 0.15:
+            A = np.c_[x, np.ones(len(x))]
+            m_raw, b_raw = np.linalg.lstsq(A, y, rcond=None)[0]
+            slope = float(m_raw)
+            intercept = float(b_raw)
+            y_pred = slope * x + intercept
+            ss_res = float(np.sum((y - y_pred) ** 2))
+            ss_tot = float(np.sum((y - mean_y) ** 2))
+            r_sq = max(0.0, min(1.0, 1.0 - (ss_res / ss_tot))) if ss_tot > 1e-6 else 0.5
+        else:
+            # Near-constant delta_t over the window: derive single-parameter physical estimate
+            if regime in ("temp_closed", "temp_open"):
+                if abs(mean_x) < 1.5:
+                    return None, None, 0.0
+                slope = mean_y / mean_x
+                intercept = 0.0
+                y_pred = slope * x
+                ss_res = float(np.sum((y - y_pred) ** 2))
+                denom = max(0.05, float(np.sum(y**2)))
+                r_sq = max(0.0, min(1.0, 1.0 - (ss_res / denom)))
+            else:
+                slope = 0.02
+                intercept = mean_y - slope * mean_x
+                r_sq = 0.6 if std_y < max(0.2, abs(mean_y) * 0.5) else 0.3
+
+        # Enforce physical sign and magnitude constraints per regime
+        if regime == "temp_closed":
+            if slope <= 0.0:
+                return None, None, 0.0
+            slope = max(0.005, min(0.25, slope))
+            intercept = max(-1.5, min(1.5, intercept))
+        elif regime == "temp_open":
+            if slope <= 0.0:
+                return None, None, 0.0
+            slope = max(0.02, min(0.80, slope))
+            intercept = max(-2.0, min(2.0, intercept))
+        elif regime == "temp_heat":
+            if mean_y <= 0.2:
+                return None, None, 0.0
+            slope = max(0.005, min(0.20, slope if slope > 0 else 0.02))
+            intercept = max(0.3, min(10.0, mean_y - slope * mean_x))
+        elif regime == "temp_cool":
+            if mean_y >= -0.2:
+                return None, None, 0.0
+            slope = max(0.005, min(0.20, slope if slope > 0 else 0.02))
+            intercept = max(-10.0, min(-0.3, mean_y - slope * mean_x))
+
+        return round(slope, 4), round(intercept, 4), round(r_sq, 3)
+
+    except Exception as err:
+        _LOGGER.debug("Online rolling OLS error: %s", err)
+        return None, None, 0.0

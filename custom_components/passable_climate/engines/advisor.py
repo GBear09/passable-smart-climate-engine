@@ -1432,3 +1432,216 @@ def evaluate_zone_plan(
             eco_mode_requested=eco_mode_on,
             scenario="closed_continuous",
         )
+
+
+SLEEP_BEDROOM_SLUGS = frozenset({
+    "master_bedroom",
+    "maxs_room",
+    "maggies_room",
+    "madeleines_room",
+})
+
+
+def calculate_preconditioning_plan(
+    closed_history: list[dict[str, float]],
+    forecast: list[dict[str, Any]],
+    hvac_mode: str,
+    seasonal_mode: str,
+    inside_temp: float,
+    active_heat_sp: float,
+    active_cool_sp: float,
+    safe_min_temp: float,
+    safe_max_temp: float,
+    hvac_heat_model: RateModel | None = None,
+    hvac_cool_model: RateModel | None = None,
+    now: datetime.datetime | None = None,
+) -> dict[str, Any]:
+    """Calculates dynamic physics-based pre-conditioning lead time before a predicted
+    closed-window comfort ceiling or floor breach.
+    Purely additive diagnostic helper.
+    """
+    default_plan: dict[str, Any] = {
+        "pre_condition_needed": False,
+        "pre_condition_mode": None,
+        "pre_condition_start_time": None,
+        "pre_condition_lead_minutes": None,
+        "predicted_breach_time": None,
+        "predicted_breach_temp": None,
+        "active_hvac_rate": None,
+    }
+    if not closed_history or not forecast:
+        return default_plan
+
+    ref_now = now or datetime.datetime.now(datetime.timezone.utc)
+    cool_ceiling = min(safe_max_temp, active_cool_sp + 1.5)
+    heat_floor = max(safe_min_temp, active_heat_sp - 1.5)
+
+    check_cool = hvac_mode in ("cool", "off", "heat_cool", "auto") or seasonal_mode in (
+        "spring_transition",
+        "heatwave_prep",
+    )
+    check_heat = hvac_mode in ("heat", "off", "heat_cool", "auto") or seasonal_mode in (
+        "fall_transition",
+        "coldsnap_prep",
+    )
+
+    breach_idx: int | None = None
+    pre_mode: str | None = None
+
+    scan_len = min(8, len(closed_history))
+    for idx in range(scan_len):
+        pt_temp = float(closed_history[idx].get("temp", inside_temp))
+        if check_cool and inside_temp <= cool_ceiling and pt_temp > cool_ceiling:
+            breach_idx = idx
+            pre_mode = "cool"
+            break
+        if check_heat and inside_temp >= heat_floor and pt_temp < heat_floor:
+            breach_idx = idx
+            pre_mode = "heat"
+            break
+
+    if breach_idx is None or pre_mode is None:
+        return default_plan
+
+    breach_dt = _resolve_horizon_dt(forecast, breach_idx + 1, ref_now)
+    breach_temp = float(closed_history[breach_idx]["temp"])
+    f_idx = min(breach_idx, len(forecast) - 1)
+    out_t = float(forecast[f_idx].get("temperature", inside_temp))
+    dt_out_in = out_t - inside_temp
+
+    window_slice = closed_history[: min(len(closed_history), breach_idx + 3)]
+    if pre_mode == "cool":
+        peak_temp = max(float(p["temp"]) for p in window_slice)
+        delta_t_breach = max(1.0, peak_temp - active_cool_sp)
+        pred_rate = -1.8
+        if hvac_cool_model is not None:
+            raw_r = float(hvac_cool_model.slope * dt_out_in + hvac_cool_model.intercept)
+            if raw_r < -0.2:
+                pred_rate = raw_r
+        abs_rate = max(0.5, min(6.0, abs(pred_rate)))
+        active_rate = -round(abs_rate, 2)
+    else:
+        trough_temp = min(float(p["temp"]) for p in window_slice)
+        delta_t_breach = max(1.0, active_heat_sp - trough_temp)
+        pred_rate = 2.5
+        if hvac_heat_model is not None:
+            raw_r = float(hvac_heat_model.slope * dt_out_in + hvac_heat_model.intercept)
+            if raw_r > 0.2:
+                pred_rate = raw_r
+        abs_rate = max(0.5, min(8.0, abs(pred_rate)))
+        active_rate = round(abs_rate, 2)
+
+    lead_min = int(round(max(30.0, min(240.0, (delta_t_breach / abs_rate) * 60.0 * 1.3))))
+    start_dt = max(ref_now, breach_dt - datetime.timedelta(minutes=lead_min))
+
+    return {
+        "pre_condition_needed": True,
+        "pre_condition_mode": pre_mode,
+        "pre_condition_start_time": _format_time(start_dt),
+        "pre_condition_lead_minutes": lead_min,
+        "predicted_breach_time": _format_time(breach_dt),
+        "predicted_breach_temp": round(breach_temp, 1),
+        "active_hvac_rate": active_rate,
+    }
+
+
+def evaluate_sleep_bedroom_offset(
+    rooms_config: dict[str, dict[str, Any]],
+    room_temps: dict[str, float | None],
+    room_rates: dict[str, float | None],
+    zone_temp: float | None,
+    hvac_mode: str,
+    seasonal_mode: str,
+    active_heat_sp: float,
+    active_cool_sp: float,
+    comfort_temp_min: float = 64.5,
+    comfort_temp_max: float = 76.0,
+    swing_heat_f: float = 0.5,
+    swing_cool_f: float = 0.5,
+    prev_offset_f: float = 0.0,
+) -> dict[str, Any]:
+    """Identifies the limiting upstairs bedroom during evening/sleep phases and computes
+    a bounded advisory thermostat offset (-4°F to +4°F in 1°F increments with 0.5°F hysteresis).
+    """
+    default_res: dict[str, Any] = {
+        "sleep_limiting_room": None,
+        "sleep_limiting_room_entity": None,
+        "sleep_limiting_room_temp": None,
+        "sleep_limiting_room_rate": None,
+        "recommended_sleep_offset_f": 0.0,
+    }
+    if zone_temp is None or not rooms_config:
+        return default_res
+
+    valid_bedrooms: list[tuple[str, str, str, float, float | None]] = []
+    for slug, r_conf in rooms_config.items():
+        if not isinstance(r_conf, dict):
+            continue
+        r_zone = str(r_conf.get("zone", "")).lower()
+        r_name = str(r_conf.get("name", slug.replace("_", " ").title()))
+        is_bedroom = slug in SLEEP_BEDROOM_SLUGS or (
+            r_zone == "upstairs" and "bedroom" in r_name.lower()
+        )
+        if not is_bedroom:
+            continue
+        t_val = room_temps.get(slug)
+        if t_val is None:
+            continue
+        t_ent = str(r_conf.get("temp_sensor", ""))
+        r_rate = room_rates.get(slug)
+        valid_bedrooms.append((slug, r_name, t_ent, float(t_val), r_rate))
+
+    if not valid_bedrooms:
+        return default_res
+
+    coldest = min(valid_bedrooms, key=lambda x: x[3])
+    warmest = max(valid_bedrooms, key=lambda x: x[3])
+
+    prefer_cool = hvac_mode == "cool" or seasonal_mode in ("spring_transition", "heatwave_prep")
+    prefer_heat = hvac_mode == "heat" or seasonal_mode in ("fall_transition", "coldsnap_prep")
+
+    if prefer_cool:
+        limiting = warmest
+        direction = "cool"
+    elif prefer_heat:
+        limiting = coldest
+        direction = "heat"
+    else:
+        if (zone_temp - coldest[3]) >= (warmest[3] - zone_temp):
+            limiting = coldest
+            direction = "heat"
+        else:
+            limiting = warmest
+            direction = "cool"
+
+    _slug, lim_name, lim_ent, lim_temp, lim_rate = limiting
+    offset_f = 0.0
+
+    if direction == "heat":
+        needs_heat_boost = lim_temp < (zone_temp - 0.5) and (
+            lim_temp < active_heat_sp or lim_temp < (comfort_temp_min + 1.0)
+        )
+        if needs_heat_boost:
+            raw_boost = (zone_temp - lim_temp) + max(0.2, float(swing_heat_f))
+            if prev_offset_f > 0.0 and abs(raw_boost - prev_offset_f) < 0.5:
+                offset_f = float(prev_offset_f)
+            else:
+                offset_f = float(max(1, min(4, int(round(raw_boost)))))
+    else:
+        needs_cool_cut = lim_temp > (zone_temp + 0.5) and (
+            lim_temp > active_cool_sp or lim_temp > (comfort_temp_max - 0.5)
+        )
+        if needs_cool_cut:
+            raw_cut = (zone_temp - lim_temp) - max(0.2, float(swing_cool_f))
+            if prev_offset_f < 0.0 and abs(raw_cut - prev_offset_f) < 0.5:
+                offset_f = float(prev_offset_f)
+            else:
+                offset_f = float(max(-4, min(-1, int(round(raw_cut)))))
+
+    return {
+        "sleep_limiting_room": lim_name,
+        "sleep_limiting_room_entity": lim_ent,
+        "sleep_limiting_room_temp": round(lim_temp, 1),
+        "sleep_limiting_room_rate": round(float(lim_rate), 2) if lim_rate is not None else None,
+        "recommended_sleep_offset_f": offset_f,
+    }

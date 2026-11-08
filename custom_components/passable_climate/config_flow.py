@@ -68,6 +68,7 @@ from .const import (
     CONF_TEMP_SENSOR,
     CONF_UPSTAIRS_CIRC_ENABLED,
     CONF_WEATHER_ENTITY,
+    CONF_WINDOW_CONTACT_DEBOUNCE_SECONDS,
     CONF_WINDOW_ECO_BOOLEAN,
     CONF_ZONE_NAME,
     CONF_ZONES,
@@ -109,6 +110,7 @@ from .const import (
     DEFAULT_SOLCAST_POWER_ENTITY,
     DEFAULT_UPSTAIRS_WINDOW_SENSORS,
     DEFAULT_WEATHER_ENTITY,
+    DEFAULT_WINDOW_CONTACT_DEBOUNCE_SECONDS,
     DEFAULT_DOWNSTAIRS_WINDOW_SENSORS,
     DEFAULT_FILTER_CAPACITY_HOURS,
     DEFAULT_ROOMS,
@@ -611,6 +613,9 @@ class SmartClimateOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_AQI_THRESHOLD, default=opts.get(CONF_AQI_THRESHOLD, DEFAULT_AQI_THRESHOLD)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=50, max=300, step=5, unit_of_measurement="AQI")
+                ),
+                vol.Required(CONF_WINDOW_CONTACT_DEBOUNCE_SECONDS, default=opts.get(CONF_WINDOW_CONTACT_DEBOUNCE_SECONDS, DEFAULT_WINDOW_CONTACT_DEBOUNCE_SECONDS)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=600, step=15, unit_of_measurement="s")
                 ),
                 vol.Required(CONF_PREEMPTIVE_ECO_MODE, default=opts.get(CONF_PREEMPTIVE_ECO_MODE, DEFAULT_PREEMPTIVE_ECO_MODE)): selector.BooleanSelector(),
             }
