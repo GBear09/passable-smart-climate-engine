@@ -1455,9 +1455,17 @@ def calculate_preconditioning_plan(
     hvac_heat_model: RateModel | None = None,
     hvac_cool_model: RateModel | None = None,
     now: datetime.datetime | None = None,
+    raw_hvac_state: str | None = None,
+    hvac_action: str | None = None,
+    is_currently_open: bool = False,
+    thermostat_temp: float | None = None,
+    thermostat_closed_history: list[dict[str, float]] | None = None,
+    swing_heat_f: float = 0.5,
+    swing_cool_f: float = 0.5,
 ) -> dict[str, Any]:
     """Calculates dynamic physics-based pre-conditioning lead time before a predicted
-    closed-window comfort ceiling or floor breach.
+    closed-window comfort ceiling or floor breach, and predicts the next automatic
+    HVAC cycle kick-on time when the thermostat is already actively maintaining comfort.
     Purely additive diagnostic helper.
     """
     default_plan: dict[str, Any] = {
@@ -1468,6 +1476,10 @@ def calculate_preconditioning_plan(
         "predicted_breach_time": None,
         "predicted_breach_temp": None,
         "active_hvac_rate": None,
+        "next_hvac_cycle_mode": None,
+        "next_hvac_cycle_time": None,
+        "next_hvac_cycle_minutes": None,
+        "next_hvac_trigger_temp": None,
     }
     if not closed_history or not forecast:
         return default_plan
@@ -1476,13 +1488,70 @@ def calculate_preconditioning_plan(
     cool_ceiling = min(safe_max_temp, active_cool_sp + 1.5)
     heat_floor = max(safe_min_temp, active_heat_sp - 1.5)
 
-    check_cool = hvac_mode in ("cool", "off", "heat_cool", "auto") or seasonal_mode in (
-        "spring_transition",
-        "heatwave_prep",
+    # Determine whether thermostat is already actively guarding cool/heat with windows closed
+    state_norm = str(raw_hvac_state).lower() if raw_hvac_state is not None else None
+    action_norm = str(hvac_action or "idle").lower()
+    is_extreme_prep = seasonal_mode in ("heatwave_prep", "coldsnap_prep")
+
+    auto_maintains_cool = (
+        state_norm in ("cool", "heat_cool", "auto")
+        and not is_currently_open
+        and not is_extreme_prep
     )
-    check_heat = hvac_mode in ("heat", "off", "heat_cool", "auto") or seasonal_mode in (
-        "fall_transition",
-        "coldsnap_prep",
+    auto_maintains_heat = (
+        state_norm in ("heat", "heat_cool", "auto")
+        and not is_currently_open
+        and not is_extreme_prep
+    )
+
+    # 1. Predict Next Automatic HVAC Cycle when thermostat is idle and maintaining comfort
+    if action_norm not in ("heating", "cooling") and (auto_maintains_heat or auto_maintains_cool):
+        t_start = float(thermostat_temp if thermostat_temp is not None else inside_temp)
+        t_hist = thermostat_closed_history if thermostat_closed_history else closed_history
+        heat_trigger = round(active_heat_sp - max(0.2, float(swing_heat_f)), 2)
+        cool_trigger = round(active_cool_sp + max(0.2, float(swing_cool_f)), 2)
+        eff_heat_trig = min(heat_trigger, round(t_start - 0.2, 2)) if t_start <= heat_trigger else heat_trigger
+        eff_cool_trig = max(cool_trigger, round(t_start + 0.2, 2)) if t_start >= cool_trigger else cool_trigger
+
+        prev_t = t_start
+        scan_cycle_len = min(8, len(t_hist))
+        for idx in range(scan_cycle_len):
+            raw_pt = float(t_hist[idx].get("temp", prev_t))
+            curr_t = (
+                raw_pt
+                if thermostat_closed_history is not None
+                else (raw_pt + (t_start - inside_temp))
+            )
+            if auto_maintains_heat and prev_t > eff_heat_trig and curr_t <= eff_heat_trig:
+                frac = (prev_t - eff_heat_trig) / max(0.05, prev_t - curr_t)
+                frac = max(0.05, min(1.0, frac))
+                mins_until = int(round((idx + frac) * 60.0))
+                cycle_dt = ref_now + datetime.timedelta(minutes=mins_until)
+                default_plan["next_hvac_cycle_mode"] = "heat"
+                default_plan["next_hvac_cycle_time"] = _format_time(cycle_dt)
+                default_plan["next_hvac_cycle_minutes"] = mins_until
+                default_plan["next_hvac_trigger_temp"] = round(eff_heat_trig, 1)
+                break
+            if auto_maintains_cool and prev_t < eff_cool_trig and curr_t >= eff_cool_trig:
+                frac = (eff_cool_trig - prev_t) / max(0.05, curr_t - prev_t)
+                frac = max(0.05, min(1.0, frac))
+                mins_until = int(round((idx + frac) * 60.0))
+                cycle_dt = ref_now + datetime.timedelta(minutes=mins_until)
+                default_plan["next_hvac_cycle_mode"] = "cool"
+                default_plan["next_hvac_cycle_time"] = _format_time(cycle_dt)
+                default_plan["next_hvac_cycle_minutes"] = mins_until
+                default_plan["next_hvac_trigger_temp"] = round(eff_cool_trig, 1)
+                break
+            prev_t = curr_t
+
+    # 2. Check Action-Required Pre-Conditioning (only when not already auto-maintained)
+    check_cool = not auto_maintains_cool and (
+        hvac_mode in ("cool", "off", "heat_cool", "auto")
+        or seasonal_mode in ("spring_transition", "heatwave_prep")
+    )
+    check_heat = not auto_maintains_heat and (
+        hvac_mode in ("heat", "off", "heat_cool", "auto")
+        or seasonal_mode in ("fall_transition", "coldsnap_prep")
     )
 
     breach_idx: int | None = None
@@ -1534,15 +1603,18 @@ def calculate_preconditioning_plan(
     lead_min = int(round(max(30.0, min(240.0, (delta_t_breach / abs_rate) * 60.0 * 1.3))))
     start_dt = max(ref_now, breach_dt - datetime.timedelta(minutes=lead_min))
 
-    return {
-        "pre_condition_needed": True,
-        "pre_condition_mode": pre_mode,
-        "pre_condition_start_time": _format_time(start_dt),
-        "pre_condition_lead_minutes": lead_min,
-        "predicted_breach_time": _format_time(breach_dt),
-        "predicted_breach_temp": round(breach_temp, 1),
-        "active_hvac_rate": active_rate,
-    }
+    default_plan.update(
+        {
+            "pre_condition_needed": True,
+            "pre_condition_mode": pre_mode,
+            "pre_condition_start_time": _format_time(start_dt),
+            "pre_condition_lead_minutes": lead_min,
+            "predicted_breach_time": _format_time(breach_dt),
+            "predicted_breach_temp": round(breach_temp, 1),
+            "active_hvac_rate": active_rate,
+        }
+    )
+    return default_plan
 
 
 def evaluate_sleep_bedroom_offset(

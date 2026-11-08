@@ -1133,6 +1133,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "pre_condition_start_time": prev_ttt_attrs.get("pre_condition_start_time"),
                     "pre_condition_lead_minutes": prev_ttt_attrs.get("pre_condition_lead_minutes"),
                     "predicted_breach_time": prev_ttt_attrs.get("predicted_breach_time"),
+                    "next_hvac_cycle_mode": None if hvac_action in ("heating", "cooling") else prev_ttt_attrs.get("next_hvac_cycle_mode"),
+                    "next_hvac_cycle_time": None if hvac_action in ("heating", "cooling") else prev_ttt_attrs.get("next_hvac_cycle_time"),
+                    "next_hvac_cycle_minutes": None if hvac_action in ("heating", "cooling") else prev_ttt_attrs.get("next_hvac_cycle_minutes"),
+                    "next_hvac_trigger_temp": None if hvac_action in ("heating", "cooling") else prev_ttt_attrs.get("next_hvac_trigger_temp"),
                 },
                 "health_status": health_status,
                 "health_attrs": {
@@ -1907,7 +1911,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             zone_plans[z_key] = plan
 
-            # Phase 4: Dynamic Rate-Derived Pre-Conditioning Lead Time (Additive Diagnostics)
+            # Phase 4: Dynamic Rate-Derived Pre-Conditioning Lead Time & Next Automatic Cycle
             closed_pre_hist = (
                 run_static_simulation(
                     initial_temp=in_temp,
@@ -1923,6 +1927,32 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if sanitized_forecast
                 else []
             )
+            raw_tstat_temp = c_attrs.get("current_temperature")
+            tstat_temp_f: float | None = None
+            if raw_tstat_temp is not None:
+                try:
+                    c_unit = str(c_attrs.get("temperature_unit") or "°F")
+                    parsed_tstat = self._to_f(float(raw_tstat_temp), c_unit)
+                    if 30.0 <= parsed_tstat <= 110.0:
+                        tstat_temp_f = parsed_tstat
+                except (ValueError, TypeError):
+                    tstat_temp_f = None
+            tstat_pre_hist = (
+                run_static_simulation(
+                    initial_temp=tstat_temp_f,
+                    initial_humidity=in_hum,
+                    forecast=sanitized_forecast[:12],
+                    model_temp=z_models.get("temp_closed"),
+                    model_hum=z_models.get("humidity_closed"),
+                    strategy="closed",
+                    lat=lat,
+                    lon=lon,
+                    solcast_forecast=solcast_forecast,
+                )
+                if (sanitized_forecast and tstat_temp_f is not None)
+                else None
+            )
+            cur_ttt_a = self.zone_diagnostics.get(z_key, {}).get("time_to_temp_attrs", {})
             precond_plan = calculate_preconditioning_plan(
                 closed_history=closed_pre_hist,
                 forecast=sanitized_forecast,
@@ -1936,6 +1966,13 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hvac_heat_model=self.models.get(f"{z_key}_temp_profile_hvac_heat"),
                 hvac_cool_model=self.models.get(f"{z_key}_temp_profile_hvac_cool"),
                 now=now,
+                raw_hvac_state=c_st,
+                hvac_action=str(c_attrs.get("hvac_action", "idle")),
+                is_currently_open=is_open,
+                thermostat_temp=tstat_temp_f,
+                thermostat_closed_history=tstat_pre_hist,
+                swing_heat_f=float(cur_ttt_a.get("learned_swing_heat_f", 0.5)),
+                swing_cool_f=float(cur_ttt_a.get("learned_swing_cool_f", 0.5)),
             )
             zone_precond_plans[z_key] = precond_plan
             if z_key in self.zone_diagnostics:
@@ -1945,6 +1982,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ttt_attrs["pre_condition_start_time"] = precond_plan["pre_condition_start_time"]
                 ttt_attrs["pre_condition_lead_minutes"] = precond_plan["pre_condition_lead_minutes"]
                 ttt_attrs["predicted_breach_time"] = precond_plan["predicted_breach_time"]
+                ttt_attrs["next_hvac_cycle_mode"] = precond_plan["next_hvac_cycle_mode"]
+                ttt_attrs["next_hvac_cycle_time"] = precond_plan["next_hvac_cycle_time"]
+                ttt_attrs["next_hvac_cycle_minutes"] = precond_plan["next_hvac_cycle_minutes"]
+                ttt_attrs["next_hvac_trigger_temp"] = precond_plan["next_hvac_trigger_temp"]
 
             lb_c, ub_c = get_comfort_bounds(in_temp, comfort_profile)
             zone_in_comfort[z_key] = (

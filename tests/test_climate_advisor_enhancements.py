@@ -211,6 +211,36 @@ class TestClimateAdvisorEnhancements(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(plan["pre_condition_start_time"])
         self.assertIsNotNone(plan["predicted_breach_time"])
 
+        # When thermostat is already in heat mode with windows closed, suppress action-required
+        # pre-conditioning and predict next automatic HVAC cycle kick-on time instead
+        heat_history = [
+            {"temp": 68.1, "humidity": 45.0},
+            {"temp": 67.2, "humidity": 45.0},
+            {"temp": 66.2, "humidity": 45.0},
+        ]
+        auto_plan = calculate_preconditioning_plan(
+            closed_history=heat_history,
+            forecast=forecast,
+            hvac_mode="heat",
+            seasonal_mode="normal",
+            inside_temp=67.6,
+            active_heat_sp=68.0,
+            active_cool_sp=74.0,
+            safe_min_temp=65.0,
+            safe_max_temp=76.0,
+            now=now,
+            raw_hvac_state="heat",
+            hvac_action="idle",
+            is_currently_open=False,
+            thermostat_temp=68.9,
+            thermostat_closed_history=heat_history,
+            swing_heat_f=0.5,
+        )
+        self.assertFalse(auto_plan["pre_condition_needed"])
+        self.assertEqual(auto_plan["next_hvac_cycle_mode"], "heat")
+        self.assertIsNotNone(auto_plan["next_hvac_cycle_time"])
+        self.assertEqual(auto_plan["next_hvac_trigger_temp"], 67.5)
+
     def test_phase5_sleep_bedroom_offset_evaluation(self):
         """evaluate_sleep_bedroom_offset must identify limiting bedroom and apply 0.5°F hysteresis."""
         rooms_cfg = {
