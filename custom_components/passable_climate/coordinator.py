@@ -711,6 +711,38 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_update_telemetry()
         self.async_update_listeners()
 
+    def _read_thermostat_temp_f(
+        self, z_key: str, climate_ent: str | None, fallback_temp: float | None = None
+    ) -> float | None:
+        """Read the thermostat's unsmoothed 0.1°F active-profile temperature.
+        Prefers the native non-_hk climate entity (e.g. climate.downstairs) when
+        climate_ent is a HomeKit integer-rounded entity (e.g. climate.downstairs_hk).
+        """
+        candidates: list[str] = []
+        if climate_ent:
+            stripped = str(climate_ent).removesuffix("_hk")
+            if stripped != climate_ent:
+                candidates.append(stripped)
+            candidates.append(str(climate_ent))
+        default_base = f"climate.{z_key}"
+        if default_base not in candidates:
+            candidates.insert(0, default_base)
+
+        for cid in candidates:
+            st_obj = self.hass.states.get(cid)
+            if not st_obj:
+                continue
+            raw_t = st_obj.attributes.get("current_temperature")
+            if raw_t is not None:
+                try:
+                    unit = str(st_obj.attributes.get("temperature_unit") or "°F")
+                    val_f = self._to_f(float(raw_t), unit)
+                    if 30.0 <= val_f <= 110.0:
+                        return round(val_f, 2)
+                except (ValueError, TypeError):
+                    continue
+        return fallback_temp
+
     async def _async_update_telemetry(self, _now: Any = None) -> None:
         """60-second lightweight telemetry loop for MLR derivatives, filter life, and diagnostics."""
         now_local = dt_util.now()
@@ -869,6 +901,12 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             fan_mode = str(c_attrs.get("fan_mode", "auto") or "auto").lower()
             zone_actions[z_key] = hvac_action
 
+            # Read thermostat's own active-profile unsmoothed temperature & 10m rate
+            tstat_temp = self._read_thermostat_temp_f(z_key, climate_ent, in_temp)
+            tstat_rate = self._record_and_calc_rate(f"tstat_temp_{z_key}", tstat_temp, now_ts)
+            eval_temp = tstat_temp if tstat_temp is not None else in_temp
+            eval_rate = round(tstat_rate, 2) if abs(tstat_rate) > 0.05 else ft_rate
+
             zt = self.telemetry_state[z_key]
             if zt.get("today_date") != today_str:
                 if zt.get("today_date"):
@@ -892,19 +930,19 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cycles.append(now_utc.isoformat())
                 zt["cycle_timestamps"] = cycles
                 zt["active_coast_tracker"] = None
-                if in_temp is not None and target_f is not None:
-                    raw_swing = (target_f - in_temp) if hvac_action == "heating" else (in_temp - target_f)
-                    if 0.1 <= raw_swing <= 3.0:
+                if eval_temp is not None and target_f is not None:
+                    raw_swing = (target_f - eval_temp) if hvac_action == "heating" else (eval_temp - target_f)
+                    if 0.1 <= raw_swing <= 1.2:
                         s_key = "swing_heat_samples" if hvac_action == "heating" else "swing_cool_samples"
                         zt[s_key] = list(zt.get(s_key, []))[-19:] + [round(raw_swing, 2)]
             elif not is_active_now:
                 zt["active_since_ts"] = None
-                if was_active and in_temp is not None:
+                if was_active and eval_temp is not None:
                     zt["active_coast_tracker"] = {
                         "mode": prev_action,
                         "stop_ts": now_utc.isoformat(),
-                        "stop_temp": round(in_temp, 2),
-                        "peak_temp": round(in_temp, 2),
+                        "stop_temp": round(eval_temp, 2),
+                        "peak_temp": round(eval_temp, 2),
                     }
 
             if is_active_now or was_active:
@@ -952,14 +990,14 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 t_mode = str(coast_tracker.get("mode", "cooling"))
                 stop_dt = dt_util.parse_datetime(str(coast_tracker.get("stop_ts", "")))
                 elapsed_coast_s = (now_utc - stop_dt).total_seconds() if stop_dt else 9999.0
-                if in_temp is not None:
-                    prev_peak = float(coast_tracker.get("peak_temp", in_temp))
-                    if t_mode == "heating" and in_temp > prev_peak:
-                        coast_tracker["peak_temp"] = round(in_temp, 2)
-                    elif t_mode == "cooling" and in_temp < prev_peak:
-                        coast_tracker["peak_temp"] = round(in_temp, 2)
-                rebounded = (t_mode == "cooling" and ft_rate >= 0.0) or (
-                    t_mode == "heating" and ft_rate <= 0.0
+                if eval_temp is not None:
+                    prev_peak = float(coast_tracker.get("peak_temp", eval_temp))
+                    if t_mode == "heating" and eval_temp > prev_peak:
+                        coast_tracker["peak_temp"] = round(eval_temp, 2)
+                    elif t_mode == "cooling" and eval_temp < prev_peak:
+                        coast_tracker["peak_temp"] = round(eval_temp, 2)
+                rebounded = (t_mode == "cooling" and eval_rate >= 0.0) or (
+                    t_mode == "heating" and eval_rate <= 0.0
                 )
                 if rebounded or elapsed_coast_s >= 5400.0:
                     if elapsed_coast_s >= 120.0:
@@ -976,8 +1014,10 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )[-19:] + [round(coast_mins, 1)]
                     zt["active_coast_tracker"] = None
 
-            sh_samples = zt.get("swing_heat_samples", [])
-            sc_samples = zt.get("swing_cool_samples", [])
+            sh_samples = [float(s) for s in zt.get("swing_heat_samples", []) if 0.1 <= float(s) <= 1.2]
+            sc_samples = [float(s) for s in zt.get("swing_cool_samples", []) if 0.1 <= float(s) <= 1.2]
+            zt["swing_heat_samples"] = sh_samples
+            zt["swing_cool_samples"] = sc_samples
             ch_samples = zt.get("coast_heat_samples", [])
             cc_samples = zt.get("coast_cool_samples", [])
             cd_samples = zt.get("coast_duration_samples", [])
@@ -995,30 +1035,33 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 round(sum(cd_samples) / len(cd_samples), 1) if cd_samples else 20.0
             )
 
-            # Physics-Based Time-to-Target & Health Diagnostics
+            # Physics-Based Time-to-Target & Health Diagnostics (uses thermostat active-profile temp)
             active_run_mins = 0.0
             if zt.get("active_since_ts"):
                 act_dt = dt_util.parse_datetime(str(zt["active_since_ts"]))
                 if act_dt:
                     active_run_mins = max(0.0, (now_utc - act_dt).total_seconds() / 60.0)
 
-            model_key = f"{z_key}_temp_profile_hvac_heat" if hvac_action == "heating" else f"{z_key}_temp_profile_hvac_cool"
+            c_mode_str = str(c_st_obj.state if c_st_obj else "off").lower()
+            use_heat_model = hvac_action == "heating" or (hvac_action != "cooling" and c_mode_str == "heat")
+            model_key = f"{z_key}_temp_profile_hvac_heat" if use_heat_model else f"{z_key}_temp_profile_hvac_cool"
             rate_model = self.models.get(model_key)
             pred_rate = 0.0
-            if rate_model and in_temp is not None:
-                delta_t = w_temp - in_temp
+            if rate_model and eval_temp is not None and w_temp is not None:
+                delta_t = w_temp - eval_temp
                 pred_rate = float(rate_model.slope * delta_t + rate_model.intercept)
-            if active_run_mins >= 10.0 and abs(ft_rate) > 0.1:
-                pred_rate = 0.5 * pred_rate + 0.5 * ft_rate if pred_rate != 0.0 else ft_rate
+            if is_active_now and active_run_mins >= 8.0 and abs(eval_rate) > 0.1:
+                if (hvac_action == "heating" and eval_rate > 0.1) or (hvac_action == "cooling" and eval_rate < -0.1):
+                    pred_rate = 0.5 * pred_rate + 0.5 * eval_rate if pred_rate != 0.0 else eval_rate
 
             time_to_temp = 0
-            if is_active_now and in_temp is not None and target_f is not None:
-                if hvac_action == "heating" and target_f > in_temp:
-                    eff_r = max(0.4, pred_rate if pred_rate > 0.2 else 1.5)
-                    time_to_temp = max(1, min(240, int(round(((target_f - in_temp) / eff_r) * 60.0))))
-                elif hvac_action == "cooling" and in_temp > target_f:
-                    eff_r = max(0.4, abs(pred_rate) if pred_rate < -0.2 else 1.5)
-                    time_to_temp = max(1, min(240, int(round(((in_temp - target_f) / eff_r) * 60.0))))
+            if is_active_now and eval_temp is not None and target_f is not None:
+                if hvac_action == "heating" and (target_f - eval_temp) > 0.05:
+                    eff_r = max(0.4, pred_rate if pred_rate > 0.2 else 2.5)
+                    time_to_temp = max(1, min(240, int(round(((target_f - eval_temp) / eff_r) * 60.0))))
+                elif hvac_action == "cooling" and (eval_temp - target_f) > 0.05:
+                    eff_r = max(0.4, abs(pred_rate) if pred_rate < -0.2 else 1.8)
+                    time_to_temp = max(1, min(240, int(round(((eval_temp - target_f) / eff_r) * 60.0))))
 
             cap_key = CONF_FILTER_CAPACITY_UPSTAIRS if z_key == "upstairs" else CONF_FILTER_CAPACITY_DOWNSTAIRS
             cap_h = (
@@ -1096,11 +1139,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else comfort_max_now
                 )
                 off_target_msg: str | None = None
-                if in_temp is not None and z_open_now == 0 and not eco_active_now and someone_home_now:
-                    if in_temp < (heat_ref - learned_swing_heat_f - 1.0):
-                        off_target_msg = f"Zone temperature ({in_temp:.1f}°F) has remained below target ({heat_ref:.1f}°F) with HVAC idle"
-                    elif in_temp > (cool_ref + learned_swing_cool_f + 1.0):
-                        off_target_msg = f"Zone temperature ({in_temp:.1f}°F) has remained above target ({cool_ref:.1f}°F) with HVAC idle"
+                if eval_temp is not None and z_open_now == 0 and not eco_active_now and someone_home_now:
+                    if eval_temp < (heat_ref - learned_swing_heat_f - 1.0):
+                        off_target_msg = f"Zone temperature ({eval_temp:.1f}°F) has remained below target ({heat_ref:.1f}°F) with HVAC idle"
+                    elif eval_temp > (cool_ref + learned_swing_cool_f + 1.0):
+                        off_target_msg = f"Zone temperature ({eval_temp:.1f}°F) has remained above target ({cool_ref:.1f}°F) with HVAC idle"
 
                 if off_target_msg:
                     if not zt.get("off_target_idle_since"):
@@ -1119,10 +1162,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "time_to_temp_attrs": {
                     "formatted": f"~{time_to_temp}m" if time_to_temp > 0 else "Idle",
                     "hvac_action": hvac_action,
-                    "current_temperature": in_temp,
+                    "current_temperature": eval_temp,
+                    "zone_average_temperature": in_temp,
                     "target_temperature": target_f,
                     "predicted_rate_f_hr": round(pred_rate, 2),
-                    "observed_rate_f_hr": ft_rate,
+                    "observed_rate_f_hr": eval_rate,
                     "active_runtime_minutes": round(active_run_mins, 1),
                     "learned_swing_heat_f": learned_swing_heat_f,
                     "learned_swing_cool_f": learned_swing_cool_f,
@@ -1927,16 +1971,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if sanitized_forecast
                 else []
             )
-            raw_tstat_temp = c_attrs.get("current_temperature")
-            tstat_temp_f: float | None = None
-            if raw_tstat_temp is not None:
-                try:
-                    c_unit = str(c_attrs.get("temperature_unit") or "°F")
-                    parsed_tstat = self._to_f(float(raw_tstat_temp), c_unit)
-                    if 30.0 <= parsed_tstat <= 110.0:
-                        tstat_temp_f = parsed_tstat
-                except (ValueError, TypeError):
-                    tstat_temp_f = None
+            tstat_temp_f = self._read_thermostat_temp_f(z_key, climate_ent, in_temp)
             tstat_pre_hist = (
                 run_static_simulation(
                     initial_temp=tstat_temp_f,

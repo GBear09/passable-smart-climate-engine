@@ -176,6 +176,16 @@ class TestClimateAdvisorEnhancements(unittest.IsolatedAsyncioTestCase):
             await coord._async_update_telemetry()
         self.assertEqual(coord.zone_diagnostics["upstairs"]["health_status"], "Filter Overdue")
 
+        # Step 5: Verify time_to_temp uses thermostat current_temperature (68.0°F) rather than lagging zone avg (67.0°F)
+        set_state("sensor.upstairs_temp", "67.0", {"unit_of_measurement": "°F"})
+        set_state("climate.upstairs", "heat", {"hvac_action": "heating", "temperature": 68.0, "current_temperature": 68.0})
+        set_state("climate.upstairs_hk", "heat", {"hvac_action": "heating", "temperature": 68.0, "current_temperature": 68})
+        with mock.patch("homeassistant.util.dt.now", return_value=t5 + datetime.timedelta(minutes=10)):
+            await coord._async_update_telemetry()
+        self.assertEqual(coord.zone_diagnostics["upstairs"]["time_to_temp"], 0)
+        self.assertAlmostEqual(coord.zone_diagnostics["upstairs"]["time_to_temp_attrs"]["current_temperature"], 68.0)
+        self.assertAlmostEqual(coord.zone_diagnostics["upstairs"]["time_to_temp_attrs"]["zone_average_temperature"], 67.0)
+
     def test_phase4_preconditioning_plan_calculation(self):
         """calculate_preconditioning_plan must compute rate-derived lead minutes before a comfort breach."""
         now = datetime.datetime(2026, 7, 20, 11, 0, 0, tzinfo=datetime.timezone.utc)
