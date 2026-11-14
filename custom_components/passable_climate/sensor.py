@@ -375,6 +375,8 @@ class PassableAdvisorRecommendationSensor(CoordinatorEntity[SmartClimateCoordina
             "recommended_sleep_offset_f": self.coordinator.recommended_sleep_offset_f,
             "compliance_summary": self.coordinator.compliance_summary,
             "learned_open_windows_fraction": self.coordinator.learned_open_windows_fraction,
+            "daily_outlook_summary": self.coordinator.daily_outlook_summary,
+            "zone_outlook_summaries": self.coordinator.zone_outlook_summaries,
         }
 
 class PassableOutdoorEnthalpySensor(CoordinatorEntity[SmartClimateCoordinator], SensorEntity):

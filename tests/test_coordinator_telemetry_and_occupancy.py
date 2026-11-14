@@ -322,6 +322,99 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
             forecast_arg = call_kwargs["forecast"]
             self.assertAlmostEqual(forecast_arg[0]["cloud_coverage"], 0.0)
 
+    async def test_daily_climate_outlook_summary_and_helper_sync(self):
+        """Daily climate outlook must synthesize next cycle, 12h passive trajectory, and sync idempotently."""
+        from custom_components.passable_climate.core.models import SimulationAction, ZonePlanResult
+
+        self.coordinator.zone_diagnostics = {
+            "upstairs": {
+                "time_to_temp": 0,
+                "time_to_temp_attrs": {
+                    "hvac_action": "idle",
+                    "current_temperature": 68.2,
+                    "target_temperature": 68.0,
+                    "next_hvac_cycle_mode": "heat",
+                    "next_hvac_cycle_time": "6:28 AM",
+                    "next_hvac_cycle_minutes": 34,
+                    "next_hvac_trigger_temp": 67.5,
+                },
+            },
+            "downstairs": {
+                "time_to_temp": 6,
+                "time_to_temp_attrs": {
+                    "hvac_action": "heating",
+                    "current_temperature": 67.5,
+                    "target_temperature": 68.0,
+                    "predicted_rate_f_hr": 4.86,
+                    "learned_coast_f": 1.08,
+                },
+            },
+        }
+        zone_plans = {
+            "upstairs": ZonePlanResult(
+                recommended_state="Close Windows",
+                details_message="Keep Upstairs windows closed to keep heat inside.",
+                history=[{"temp": 65.1, "humidity": 42.7}, {"temp": 59.5, "humidity": 50.6}],
+                actions=[SimulationAction("closed", 2)],
+                eco_mode_requested=False,
+                scenario="closed_continuous",
+            ),
+            "downstairs": ZonePlanResult(
+                recommended_state="Close Windows",
+                details_message="Keep Downstairs windows closed.",
+                history=[{"temp": 65.0, "humidity": 43.0}, {"temp": 60.0, "humidity": 50.0}],
+                actions=[SimulationAction("closed", 2)],
+                eco_mode_requested=False,
+                scenario="closed_continuous",
+            ),
+        }
+        avg_hist = [{"temp": 65.05, "humidity": 42.85}, {"temp": 59.75, "humidity": 50.3}]
+        sanitized_forecast = [{"temperature": 39.0}, {"temperature": 51.0}]
+
+        self.coordinator._build_climate_outlook_summaries(
+            zone_plans=zone_plans,
+            avg_hist=avg_hist,
+            sanitized_forecast=sanitized_forecast,
+            w_temp=41.0,
+            final_state="Close Windows",
+            zone_climates={"upstairs": "heat", "downstairs": "heat"},
+        )
+
+        daily = self.coordinator.daily_outlook_summary
+        self.assertGreater(len(daily), 0)
+        self.assertLessEqual(len(daily), 255)
+        self.assertIn("6:28 AM", daily)
+        self.assertIn("Heating (~6m)", daily)
+        self.assertIn("65.0->59.8", daily.replace("65.1->59.8", "65.0->59.8"))
+        self.assertIn("Keep windows closed", daily)
+
+        up_text = self.coordinator.zone_outlook_summaries["upstairs"]
+        dn_text = self.coordinator.zone_outlook_summaries["downstairs"]
+        self.assertIn("6:28 AM", up_text)
+        self.assertIn("~6m left", dn_text)
+        self.assertIn("post-cycle coast", dn_text)
+
+        # Idempotent helper sync check
+        self.coordinator.actuation_enabled = True
+        msg_state = mock.MagicMock()
+        msg_state.state = "stale message"
+        self.coordinator.hass.states.get.side_effect = lambda eid: msg_state if eid == "input_text.hvac_advisor_prediction_message" else None
+        self.coordinator.hass.services.async_call = mock.AsyncMock()
+
+        await self.coordinator._async_sync_prediction_message("input_text.hvac_advisor_prediction_message", daily)
+        self.coordinator.hass.services.async_call.assert_awaited_once_with(
+            "input_text",
+            "set_value",
+            {"entity_id": "input_text.hvac_advisor_prediction_message", "value": daily},
+            blocking=True,
+        )
+
+        # Second call when state already matches must be a no-op
+        msg_state.state = daily
+        self.coordinator.hass.services.async_call.reset_mock()
+        await self.coordinator._async_sync_prediction_message("input_text.hvac_advisor_prediction_message", daily)
+        self.coordinator.hass.services.async_call.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

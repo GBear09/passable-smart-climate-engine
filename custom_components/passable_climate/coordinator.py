@@ -284,6 +284,8 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.heat_prediction_alert: bool = False
         self.comfort_recovery_active: bool = False
         self._last_bad_weather_time: str | None = None
+        self.daily_outlook_summary: str = ""
+        self.zone_outlook_summaries: dict[str, str] = {"upstairs": "", "downstairs": ""}
 
         # Psychrometric Box Comfort Envelope Parameters
         self.comfort_settings: dict[str, float] = {
@@ -578,6 +580,166 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         except Exception as err:
             _LOGGER.warning("Could not set value on helper %s: %s", rec_ent, err)
+
+    async def _async_sync_prediction_message(self, entity_id: str | None, value: str) -> None:
+        """Sync daily climate outlook or overnight alert message to input_text helper (<=255 chars)."""
+        if not entity_id or not self.actuation_enabled:
+            return
+        clean_val = (value or "").strip()[:255]
+        if not clean_val:
+            return
+        st = self.hass.states.get(entity_id)
+        if st is not None and st.state == clean_val:
+            return
+        try:
+            await self.hass.services.async_call(
+                "input_text",
+                "set_value",
+                {"entity_id": entity_id, "value": clean_val},
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.warning("Could not set prediction message on %s: %s", entity_id, err)
+
+    def _build_climate_outlook_summaries(
+        self,
+        *,
+        zone_plans: dict[str, ZonePlanResult],
+        avg_hist: list[dict[str, float]],
+        sanitized_forecast: list[dict[str, Any]],
+        w_temp: float,
+        final_state: str,
+        zone_climates: dict[str, str],
+    ) -> None:
+        """Build Pixel Weather-style per-zone narratives and <=255-char whole-house outlook."""
+        horizon_fc = sanitized_forecast[:12] if sanitized_forecast else []
+        out_temps = [float(f["temperature"]) for f in horizon_fc if f.get("temperature") is not None]
+        if out_temps:
+            out_min = min(out_temps)
+            out_max = max(out_temps)
+            out_ctx = (
+                f"with {out_min:.0f}°–{out_max:.0f}°F outdoors"
+                if abs(out_max - out_min) >= 1.5
+                else f"with ~{w_temp:.0f}°F outdoors"
+            )
+        else:
+            out_ctx = f"with ~{w_temp:.0f}°F outdoors"
+
+        zone_labels = {"upstairs": "Upstairs", "downstairs": "Downstairs"}
+        short_parts: dict[str, str] = {}
+        new_zone_summaries: dict[str, str] = {}
+
+        for z_key in ("upstairs", "downstairs"):
+            z_label = zone_labels[z_key]
+            diag = self.zone_diagnostics.get(z_key, {})
+            ttt_a = diag.get("time_to_temp_attrs", {})
+            ttt_mins = int(diag.get("time_to_temp", 0) or 0)
+            action = str(ttt_a.get("hvac_action") or zone_climates.get(z_key, "idle") or "idle").lower()
+            cur_t = ttt_a.get("current_temperature")
+            tgt_t = ttt_a.get("target_temperature")
+            pred_rate = ttt_a.get("predicted_rate_f_hr")
+            obs_rate = ttt_a.get("observed_rate_f_hr")
+            if obs_rate is None:
+                obs_rate = self.zone_fault_tolerant_rates.get(z_key, 0.0)
+            coast_f = float(ttt_a.get("learned_coast_f") or 0.0)
+            next_mode = ttt_a.get("next_hvac_cycle_mode")
+            next_time = ttt_a.get("next_hvac_cycle_time")
+            next_mins = ttt_a.get("next_hvac_cycle_minutes")
+            next_trig = ttt_a.get("next_hvac_trigger_temp")
+            pre_needed = bool(ttt_a.get("pre_condition_needed"))
+            pre_mode = ttt_a.get("pre_condition_mode")
+            pre_start = ttt_a.get("pre_condition_start_time")
+            breach_t = ttt_a.get("predicted_breach_time")
+
+            # Sentence 1: Live cycle & next predicted cycle
+            if action in ("heating", "cooling"):
+                verb = "heating" if action == "heating" else "cooling"
+                short_verb = "Heating" if action == "heating" else "Cooling"
+                tgt_str = f"{float(tgt_t):.0f}°F" if tgt_t is not None else "setpoint"
+                if ttt_mins > 0:
+                    rate_bit = (
+                        f" ({float(pred_rate):+.1f}°/h)"
+                        if pred_rate is not None and abs(float(pred_rate)) >= 0.2
+                        else ""
+                    )
+                    coast_bit = f" Expect ~{coast_f:.1f}°F post-cycle coast." if coast_f >= 0.3 else ""
+                    s1 = f"{z_label} is {verb} toward {tgt_str} (~{ttt_mins}m left{rate_bit}).{coast_bit}"
+                    short_parts[z_key] = f"{short_verb} (~{ttt_mins}m)"
+                else:
+                    s1 = f"{z_label} is maintaining {tgt_str}."
+                    short_parts[z_key] = f"{short_verb} (near {tgt_str})"
+            elif pre_needed and pre_start:
+                pre_word = "pre-cooling" if pre_mode == "cool" else "pre-heating"
+                t_now_s = f"{float(cur_t):.1f}°F" if cur_t is not None else "comfort"
+                breach_bit = f" before {breach_t} limit" if breach_t else ""
+                s1 = f"{z_label} is idle at {t_now_s}; {pre_word} recommended around {pre_start}{breach_bit}."
+                short_parts[z_key] = f"Pre-{pre_mode or 'cond'} @{pre_start}"
+            elif next_mode and next_time:
+                t_now_s = f"{float(cur_t):.1f}°F" if cur_t is not None else "steady"
+                min_s = f" (~{int(round(float(next_mins)))}m)" if next_mins is not None else ""
+                trig_s = f" near {float(next_trig):.1f}°F" if next_trig is not None else ""
+                s1 = f"{z_label} is idle at {t_now_s}; next {next_mode} cycle predicted around {next_time}{min_s}{trig_s}."
+                short_min = f" ({int(round(float(next_mins)))}m)" if next_mins is not None else ""
+                short_parts[z_key] = f"Next {next_mode} {next_time}{short_min}"
+            else:
+                drift_f = float(obs_rate or 0.0)
+                t_now_s = f"{float(cur_t):.1f}°F" if cur_t is not None else ""
+                if abs(drift_f) >= 0.2:
+                    dir_word = "warming" if drift_f > 0 else "cooling"
+                    s1 = f"{z_label} is idle{' at ' + t_now_s if t_now_s else ''}, {dir_word} gently at {drift_f:+.1f}°/h."
+                    short_parts[z_key] = f"Idle ({drift_f:+.1f}°/h)"
+                else:
+                    s1 = f"{z_label} is idle and holding steady{' near ' + t_now_s if t_now_s else ''}."
+                    short_parts[z_key] = f"Idle ({t_now_s or 'Steady'})"
+
+            # Sentence 2: 12h passive trajectory + outdoor context
+            plan = zone_plans.get(z_key)
+            z_hist = (plan.history if plan and plan.history else avg_hist) or []
+            if len(z_hist) >= 2:
+                t0, t1 = float(z_hist[0]["temp"]), float(z_hist[-1]["temp"])
+                h0, h1 = float(z_hist[0]["humidity"]), float(z_hist[-1]["humidity"])
+                dt = t1 - t0
+                if abs(dt) < 0.8:
+                    trend_desc = f"holds steady ({t0:.1f}°→{t1:.1f}°F)"
+                elif dt < 0:
+                    trend_desc = f"drifts {t0:.1f}°→{t1:.1f}°F ({dt:+.1f}°F)"
+                else:
+                    trend_desc = f"warms {t0:.1f}°→{t1:.1f}°F ({dt:+.1f}°F)"
+                hrs = len(z_hist)
+                s2 = f"Over the next {hrs}h unconditioned, indoor temp {trend_desc} as RH moves {h0:.0f}%→{h1:.0f}% {out_ctx}."
+            else:
+                s2 = f"Monitoring indoor drift {out_ctx}."
+
+            # Sentence 3: Window & bedroom microclimate advisory
+            adv_note = plan.details_message.strip() if (plan and plan.details_message) else f"Recommendation: {final_state}."
+            if z_key == "upstairs" and (self.is_bedtime or self.is_evening) and self.sleep_limiting_room and self.recommended_sleep_offset_f > 0:
+                lim_temp = f" ({float(self.sleep_limiting_room_temp):.1f}°F)" if self.sleep_limiting_room_temp is not None else ""
+                adv_note = f"{adv_note} Sleep offset tracks {self.sleep_limiting_room}{lim_temp}."
+
+            new_zone_summaries[z_key] = f"{s1} {s2} {adv_note}".strip()
+
+        self.zone_outlook_summaries = new_zone_summaries
+
+        # Concise whole-house summary for input_text.hvac_advisor_prediction_message (<=255 chars)
+        segments: list[str] = []
+        if "upstairs" in short_parts:
+            segments.append(f"Up: {short_parts['upstairs']}")
+        if "downstairs" in short_parts:
+            segments.append(f"Dn: {short_parts['downstairs']}")
+        head = " | ".join(segments)
+
+        traj_bit = ""
+        if len(avg_hist) >= 2:
+            at0, at1 = float(avg_hist[0]["temp"]), float(avg_hist[-1]["temp"])
+            ah0, ah1 = float(avg_hist[0]["humidity"]), float(avg_hist[-1]["humidity"])
+            adt = at1 - at0
+            traj_bit = f" 12h passive: {at0:.1f}->{at1:.1f}°F ({adt:+.1f}°), RH {ah0:.0f}->{ah1:.0f}%."
+
+        win_tail = "Open windows." if final_state == OPEN else "Keep windows closed."
+        candidate = f"{head}.{traj_bit} {win_tail}".strip() if head else f"{traj_bit.strip()} {win_tail}".strip()
+        if len(candidate) > 255:
+            candidate = candidate[:252].rstrip(" ,;:-") + "..."
+        self.daily_outlook_summary = candidate
 
     def get_configured_rooms(self) -> dict[str, dict[str, Any]]:
         """Return configured rooms dictionary merged with DEFAULT_ROOMS."""
@@ -2319,8 +2481,16 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif down_plan and down_plan.history:
             avg_hist = down_plan.history
         self.last_plan_history = avg_hist
+        self._build_climate_outlook_summaries(
+            zone_plans=zone_plans,
+            avg_hist=avg_hist,
+            sanitized_forecast=sanitized_forecast,
+            w_temp=w_temp,
+            final_state=final_state,
+            zone_climates=zone_climates,
+        )
 
-        # 7. Bedtime Overnight Heat Prediction Alert
+        # 7. Bedtime Overnight Heat Prediction Alert & Daily Outlook Sync
         self.heat_prediction_alert = False
         predict_heat_ent = self.options.get(
             CONF_PREDICT_HEAT_BOOLEAN,
@@ -2380,15 +2550,18 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 if not is_prediction_on and self.actuation_enabled:
                     try:
-                        await self.hass.services.async_call("input_text", "set_value", {"entity_id": predict_msg_ent, "value": msg})
+                        await self._async_sync_prediction_message(predict_msg_ent, msg)
                         await self._async_command_bool(predict_heat_ent, True)
                     except Exception as e:
                         _LOGGER.error("Failed to set heat prediction entities: %s", e)
 
                 details += "\n\n**Note:** A switch to **Heat Mode** may be required overnight."
 
-        if not self.heat_prediction_alert and predict_heat_ent:
-            await self._async_command_bool(predict_heat_ent, False)
+        if not self.heat_prediction_alert:
+            if predict_heat_ent:
+                await self._async_command_bool(predict_heat_ent, False)
+            if predict_msg_ent and self.daily_outlook_summary:
+                await self._async_sync_prediction_message(predict_msg_ent, self.daily_outlook_summary)
 
         self.last_details = details
         self.last_update_time = now_utc
