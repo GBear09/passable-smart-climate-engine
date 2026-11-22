@@ -415,6 +415,133 @@ class TestCoordinatorTelemetryAndOccupancy(unittest.IsolatedAsyncioTestCase):
         await self.coordinator._async_sync_prediction_message("input_text.hvac_advisor_prediction_message", daily)
         self.coordinator.hass.services.async_call.assert_not_awaited()
 
+    async def test_per_zone_simulation_trajectories_published_with_plan_fallback(self):
+        """_async_evaluate and PassableSimulationDataSensor must publish separate per-zone trajectories alongside averaged plan."""
+        import json
+        from custom_components.passable_climate.core.models import SimulationAction, ZonePlanResult
+        from custom_components.passable_climate.sensor import PassableSimulationDataSensor
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self.coordinator.hass.config.latitude = 38.8
+        self.coordinator.hass.config.longitude = -77.1
+        self.coordinator.entry_data["zones"] = {
+            "upstairs": {
+                "name": "Upstairs",
+                "temperature_sensor": "sensor.upstairs_temp",
+                "humidity_sensor": "sensor.upstairs_humidity",
+                "open_windows_sensor": "sensor.upstairs_windows",
+            },
+            "downstairs": {
+                "name": "Downstairs",
+                "temperature_sensor": "sensor.downstairs_temp",
+                "humidity_sensor": "sensor.downstairs_humidity",
+                "open_windows_sensor": "sensor.downstairs_windows",
+            },
+        }
+
+        def make_state(state_val, attrs=None):
+            s = mock.MagicMock()
+            s.state = str(state_val)
+            s.attributes = attrs or {}
+            s.last_reported = now
+            s.last_updated = now
+            return s
+
+        state_map = {
+            "weather.home": make_state(
+                "cloudy",
+                {
+                    "temperature": 45.0,
+                    "temperature_unit": "°F",
+                    "humidity": 55.0,
+                    "wind_speed": 4.0,
+                    "wind_speed_unit": "mph",
+                    "cloud_coverage": 50.0,
+                },
+            ),
+            "sensor.upstairs_temp": make_state("67.6", {"unit_of_measurement": "°F"}),
+            "sensor.upstairs_humidity": make_state("48.0", {"unit_of_measurement": "%"}),
+            "sensor.upstairs_windows": make_state("0"),
+            "sensor.downstairs_temp": make_state("68.6", {"unit_of_measurement": "°F"}),
+            "sensor.downstairs_humidity": make_state("48.0", {"unit_of_measurement": "%"}),
+            "sensor.downstairs_windows": make_state("0"),
+        }
+        self.coordinator.hass.states.get.side_effect = lambda ent_id: state_map.get(ent_id)
+        self.coordinator.hass.services.async_call = mock.AsyncMock(
+            return_value={
+                "weather.home": {
+                    "forecast": [
+                        {
+                            "datetime": (now + datetime.timedelta(minutes=30)).isoformat(),
+                            "temperature": 44.0,
+                            "humidity": 58.0,
+                            "condition": "cloudy",
+                            "wind_speed": 4.0,
+                            "cloud_coverage": 50.0,
+                        },
+                        {
+                            "datetime": (now + datetime.timedelta(minutes=90)).isoformat(),
+                            "temperature": 42.0,
+                            "humidity": 60.0,
+                            "condition": "cloudy",
+                            "wind_speed": 4.0,
+                            "cloud_coverage": 50.0,
+                        },
+                    ]
+                }
+            }
+        )
+
+        up_history = [{"temp": 66.8, "humidity": 48.0}, {"temp": 65.7, "humidity": 56.0}]
+        dn_history = [{"temp": 66.9, "humidity": 48.0}, {"temp": 64.8, "humidity": 58.0}]
+        expected_avg = [
+            {"temp": round((66.8 + 66.9) / 2.0, 2), "humidity": 48.0},
+            {"temp": round((65.7 + 64.8) / 2.0, 2), "humidity": 57.0},
+        ]
+
+        def zone_plan_side_effect(**kwargs):
+            if kwargs.get("zone_name") == "Upstairs":
+                return ZonePlanResult(
+                    recommended_state="Close Windows",
+                    details_message="Keep Upstairs windows closed.",
+                    history=list(up_history),
+                    actions=[SimulationAction("closed", 2)],
+                    eco_mode_requested=False,
+                    scenario="closed_continuous",
+                )
+            return ZonePlanResult(
+                recommended_state="Close Windows",
+                details_message="Keep Downstairs windows closed.",
+                history=list(dn_history),
+                actions=[SimulationAction("closed", 2)],
+                eco_mode_requested=False,
+                scenario="closed_continuous",
+            )
+
+        with mock.patch(
+            "custom_components.passable_climate.coordinator.evaluate_zone_plan",
+            side_effect=zone_plan_side_effect,
+        ):
+            eval_res = await self.coordinator._async_evaluate()
+
+        self.assertEqual(self.coordinator.last_plan_history, expected_avg)
+        self.assertEqual(self.coordinator.last_zone_plan_histories["upstairs"], up_history)
+        self.assertEqual(self.coordinator.last_zone_plan_histories["downstairs"], dn_history)
+        self.assertEqual(eval_res["zone_histories"], self.coordinator.last_zone_plan_histories)
+
+        sensor = PassableSimulationDataSensor(self.coordinator, self.entry)
+        payload = json.loads(sensor.extra_state_attributes["data"])
+        self.assertEqual(payload["plan"], expected_avg)
+        self.assertEqual(payload["zones"]["upstairs"], up_history)
+        self.assertEqual(payload["zones"]["downstairs"], dn_history)
+        self.assertNotEqual(payload["zones"]["upstairs"], payload["zones"]["downstairs"])
+
+        # Empty zone history must be omitted from "zones" while preserving valid zone and "plan"
+        self.coordinator.last_zone_plan_histories = {"upstairs": up_history, "downstairs": []}
+        partial_payload = json.loads(sensor.extra_state_attributes["data"])
+        self.assertEqual(partial_payload["plan"], expected_avg)
+        self.assertEqual(partial_payload["zones"], {"upstairs": up_history})
+
 
 if __name__ == "__main__":
     unittest.main()

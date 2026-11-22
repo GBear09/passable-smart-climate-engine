@@ -269,6 +269,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_recommendation: str = CLOSE
         self.last_details: str = "Initializing Passable Smart Climate Engine..."
         self.last_plan_history: list[dict[str, float]] = []
+        self.last_zone_plan_histories: dict[str, list[dict[str, float]]] = {}
         self.zone_results: dict[str, ZonePlanResult] = {}
         self.is_hazard_vetoed: bool = False
         self.hazard_veto_reason: str = ""
@@ -2481,6 +2482,11 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif down_plan and down_plan.history:
             avg_hist = down_plan.history
         self.last_plan_history = avg_hist
+        self.last_zone_plan_histories = {
+            z_key: list(plan.history)
+            for z_key, plan in zone_plans.items()
+            if plan and plan.history
+        }
         self._build_climate_outlook_summaries(
             zone_plans=zone_plans,
             avg_hist=avg_hist,
@@ -2573,6 +2579,7 @@ class SmartClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "state": final_state,
             "details": details,
             "history": avg_hist,
+            "zone_histories": self.last_zone_plan_histories,
             "is_vetoed": is_vetoed,
             "veto_reason": veto_reason,
             "phase": self.current_phase,

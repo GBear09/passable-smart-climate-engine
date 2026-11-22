@@ -317,12 +317,32 @@ class PassableSimulationDataSensor(CoordinatorEntity[SmartClimateCoordinator], S
     def native_value(self) -> datetime.datetime | None:
         return self.coordinator.last_update_time
 
+    def _zones_payload(self) -> dict[str, list[dict[str, float]]]:
+        """Return per-zone forward trajectories, falling back to zone_results."""
+        zones_payload: dict[str, list[dict[str, float]]] = {
+            z_key: list(hist)
+            for z_key, hist in (self.coordinator.last_zone_plan_histories or {}).items()
+            if hist
+        }
+        if not zones_payload and self.coordinator.zone_results:
+            zones_payload = {
+                z_key: list(plan.history)
+                for z_key, plan in self.coordinator.zone_results.items()
+                if plan and plan.history
+            }
+        return zones_payload
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "friendly_name": "Advisor Simulation Data",
             "icon": "mdi:chart-line",
-            "data": json.dumps({"plan": self.coordinator.last_plan_history}),
+            "data": json.dumps(
+                {
+                    "plan": self.coordinator.last_plan_history,
+                    "zones": self._zones_payload(),
+                }
+            ),
             "is_bedtime": self.coordinator.is_bedtime,
             "is_evening": self.coordinator.is_evening,
             "is_bedtime_prediction": self.coordinator.is_bedtime or self.coordinator.is_evening,
